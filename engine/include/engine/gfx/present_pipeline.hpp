@@ -18,6 +18,10 @@ struct PresentPipelineCreateInfo {
 //   set0,binding1 combined sampler  (gAlbedoRough)
 //   set0,binding2 combined sampler  (gNormal)
 //   set0,binding3 combined sampler  (gDepth)
+//   set0,binding4 uniform buffer    (VoxelAABB)
+//   set0,binding5 combined sampler  (L0 occupancy texture)
+//   set0,binding6 combined sampler  (L1 occupancy texture)
+//   set0,binding7 storage image     (shadow step count image)
 class PresentPipeline {
 public:
   explicit PresentPipeline(const PresentPipelineCreateInfo& ci);
