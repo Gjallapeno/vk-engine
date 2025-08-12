@@ -4,6 +4,8 @@
 #include <vector>
 #include <cstring>
 #include <algorithm>
+#include <fstream>
+#include <cstdint>
 
 namespace engine {
 
@@ -13,13 +15,27 @@ static bool supports_present(VkPhysicalDevice pd, uint32_t qf, VkSurfaceKHR surf
   return supported == VK_TRUE;
 }
 
+static const char* kPipelineCacheFile = "pipeline_cache.bin";
+
 VulkanDevice::VulkanDevice(const VulkanDeviceCreateInfo& ci)
   : instance_(ci.instance), surface_(ci.surface) {
   pick_physical(instance_, surface_);
   create_logical(ci.enable_validation);
+  create_pipeline_cache();
 }
 
 VulkanDevice::~VulkanDevice() {
+  if (cache_) {
+    size_t size = 0;
+    VK_CHECK(vkGetPipelineCacheData(dev_, cache_, &size, nullptr));
+    if (size > 0) {
+      std::vector<uint8_t> data(size);
+      VK_CHECK(vkGetPipelineCacheData(dev_, cache_, &size, data.data()));
+      std::ofstream f(kPipelineCacheFile, std::ios::binary | std::ios::trunc);
+      if (f) f.write(reinterpret_cast<char*>(data.data()), size);
+    }
+    vkDestroyPipelineCache(dev_, cache_, nullptr);
+  }
   if (dev_) vkDestroyDevice(dev_, nullptr);
 }
 
@@ -132,5 +148,20 @@ void VulkanDevice::create_logical(bool enable_validation) {
     vkGetDeviceQueue(dev_, q_present_index_, 0, &q_present_);
     spdlog::info("[vk] Logical device created. gfxQ={} presentQ={}", q_gfx_index_, q_present_index_);
   }
+
+void VulkanDevice::create_pipeline_cache() {
+  std::vector<uint8_t> data;
+  std::ifstream f(kPipelineCacheFile, std::ios::binary | std::ios::ate);
+  if (f) {
+    size_t sz = static_cast<size_t>(f.tellg());
+    data.resize(sz);
+    f.seekg(0);
+    f.read(reinterpret_cast<char*>(data.data()), sz);
+  }
+  VkPipelineCacheCreateInfo ci{ VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
+  ci.initialDataSize = data.size();
+  ci.pInitialData = data.data();
+  VK_CHECK(vkCreatePipelineCache(dev_, &ci, nullptr, &cache_));
+}
   
 } // namespace engine

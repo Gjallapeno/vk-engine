@@ -128,7 +128,7 @@ TrianglePipeline::TrianglePipeline(const TrianglePipelineCreateInfo& ci)
   gpc.layout = layout_;
   gpc.renderPass = VK_NULL_HANDLE; gpc.subpass = 0;
 
-  VK_CHECK(vkCreateGraphicsPipelines(dev_, VK_NULL_HANDLE, 1, &gpc, nullptr, &pipeline_));
+  VK_CHECK(vkCreateGraphicsPipelines(dev_, ci.pipeline_cache, 1, &gpc, nullptr, &pipeline_));
 
   vkDestroyShaderModule(dev_, fs, nullptr);
   vkDestroyShaderModule(dev_, vs, nullptr);
