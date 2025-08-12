@@ -67,15 +67,15 @@ bool gridRaycastL0(Ray r, out ivec3 cell, out int hitFace, out float tHit, out i
         if(texelFetch(uOccTex, cell, 0).r > 0u){ tHit = t; return true; }
         if(tMax.x < tMax.y){
             if(tMax.x < tMax.z){
-                cell.x += step.x; t = tMax.x; tMax.x += tDelta.x; hitFace = step.x > 0 ? 1 : 0;
+                cell.x += step.x; t = tMax.x; tMax.x += tDelta.x; hitFace = step.x > 0 ? 0 : 1;
             }else{
-                cell.z += step.z; t = tMax.z; tMax.z += tDelta.z; hitFace = step.z > 0 ? 5 : 4;
+                cell.z += step.z; t = tMax.z; tMax.z += tDelta.z; hitFace = step.z > 0 ? 4 : 5;
             }
         }else{
             if(tMax.y < tMax.z){
-                cell.y += step.y; t = tMax.y; tMax.y += tDelta.y; hitFace = step.y > 0 ? 3 : 2;
+                cell.y += step.y; t = tMax.y; tMax.y += tDelta.y; hitFace = step.y > 0 ? 2 : 3;
             }else{
-                cell.z += step.z; t = tMax.z; tMax.z += tDelta.z; hitFace = step.z > 0 ? 5 : 4;
+                cell.z += step.z; t = tMax.z; tMax.z += tDelta.z; hitFace = step.z > 0 ? 4 : 5;
             }
         }
         pos = r.o + t * r.d;
