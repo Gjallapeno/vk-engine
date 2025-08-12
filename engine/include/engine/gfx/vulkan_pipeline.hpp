@@ -15,6 +15,7 @@ struct TrianglePipelineCreateInfo {
 
 // Graphics pipeline: set=0,binding=0 combined image sampler.
 // Vertex format: location0 = vec3 pos, location1 = vec2 uv.
+// Push constant: mat4 view-projection matrix.
 class TrianglePipeline {
 public:
   explicit TrianglePipeline(const TrianglePipelineCreateInfo& ci);

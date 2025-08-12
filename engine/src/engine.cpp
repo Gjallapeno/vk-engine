@@ -11,6 +11,10 @@
 #include <engine/gfx/vulkan_commands.hpp>
 #include <engine/gfx/vulkan_pipeline.hpp>
 #include <engine/gfx/memory.hpp>
+#include <engine/camera.hpp>
+
+#include <GLFW/glfw3.h>
+#include <algorithm>
 
 #include <spdlog/spdlog.h>
 #include <thread>
@@ -45,6 +49,7 @@ struct DrawCtx {
   std::vector<Image2D>        depth_images;
   std::vector<VkImageView>    depth_views;
   std::vector<bool>           depth_first_use;
+  glm::mat4                  view_proj{1.0f};
 };
 
 static void record_textured(VkCommandBuffer cmd, VkImage swap_img, VkImageView view,
@@ -120,9 +125,8 @@ static void record_textured(VkCommandBuffer cmd, VkImage swap_img, VkImageView v
 
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipe->pipeline());
 
-  float aspect = static_cast<float>(extent.width) /
-                 (extent.height > 0 ? static_cast<float>(extent.height) : 1.0f);
-  vkCmdPushConstants(cmd, ctx->pipe->layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float), &aspect);
+  vkCmdPushConstants(cmd, ctx->pipe->layout(), VK_SHADER_STAGE_VERTEX_BIT, 0,
+                     sizeof(glm::mat4), &ctx->view_proj);
 
   VkBuffer vbos[] = { ctx->vbo };
   VkDeviceSize offs[] = { 0 };
@@ -142,6 +146,13 @@ int run() {
 
   WindowDesc wdesc{}; wdesc.title = "vk_engine Step 11 (textured quad)";
   auto window = create_window(wdesc);
+
+  Camera cam;
+  GLFWwindow* glfw_win = static_cast<GLFWwindow*>(window->native_handle());
+  glfwSetInputMode(glfw_win, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+  double last_x = 0.0, last_y = 0.0;
+  glfwGetCursorPos(glfw_win, &last_x, &last_y);
+  auto last_time = std::chrono::high_resolution_clock::now();
 
   VulkanInstanceCreateInfo ici{}; ici.enable_validation = cfg::kValidation;
   for (auto* e : platform_required_instance_extensions()) ici.extra_extensions.push_back(e);
@@ -323,6 +334,33 @@ int run() {
   while (!window->should_close()) {
     window->poll_events();
 
+    auto now = std::chrono::high_resolution_clock::now();
+    float dt = std::chrono::duration<float>(now - last_time).count();
+    last_time = now;
+
+    double cx, cy;
+    glfwGetCursorPos(glfw_win, &cx, &cy);
+    float dx = static_cast<float>(cx - last_x);
+    float dy = static_cast<float>(cy - last_y);
+    last_x = cx; last_y = cy;
+
+    const float sens = 0.002f;
+    cam.yaw   += dx * sens;
+    cam.pitch -= dy * sens;
+    cam.pitch = std::clamp(cam.pitch, -glm::half_pi<float>() + 0.01f,
+                                      glm::half_pi<float>() - 0.01f);
+
+    glm::vec3 move{0.0f};
+    if (glfwGetKey(glfw_win, GLFW_KEY_W) == GLFW_PRESS) move += cam.forward();
+    if (glfwGetKey(glfw_win, GLFW_KEY_S) == GLFW_PRESS) move -= cam.forward();
+    if (glfwGetKey(glfw_win, GLFW_KEY_A) == GLFW_PRESS) move -= cam.right();
+    if (glfwGetKey(glfw_win, GLFW_KEY_D) == GLFW_PRESS) move += cam.right();
+    if (glfwGetKey(glfw_win, GLFW_KEY_SPACE) == GLFW_PRESS) move += glm::vec3(0.0f,1.0f,0.0f);
+    if (glfwGetKey(glfw_win, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) move -= glm::vec3(0.0f,1.0f,0.0f);
+    if (glm::length(move) > 0.0f) {
+      cam.position += glm::normalize(move) * (2.0f * dt);
+    }
+
     auto fb = window->framebuffer_size();
     VkExtent2D want{ static_cast<uint32_t>(fb.first), static_cast<uint32_t>(fb.second) };
     if (want.width == 0 || want.height == 0) { std::this_thread::sleep_for(10ms); continue; }
@@ -336,6 +374,9 @@ int run() {
       std::this_thread::sleep_for(1ms);
       continue;
     }
+    ctx.view_proj = cam.view_projection(
+        static_cast<float>(want.width) / static_cast<float>(want.height),
+        0.1f, 100.0f);
 
     commands->acquire_record_present(
       swapchain->vk(),
