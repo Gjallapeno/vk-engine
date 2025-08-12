@@ -115,6 +115,10 @@ struct VoxelAABB {
   float pad1 = 0.0f;
   glm::ivec3 dim{0};
   int pad2 = 0;
+  glm::ivec3 occL1Dim{0};
+  int pad3 = 0;
+  glm::vec3 occL1CellSize{0.0f};
+  float pad4 = 0.0f;
 };
 
 struct VoxParams {
@@ -545,6 +549,7 @@ int run() {
   Buffer vox_params_buf = create_buffer(allocator.raw(), sizeof(VoxParams),
                                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
   const uint32_t N = 128;
+  const uint32_t N1 = N / 4;
   Image3D occ_img{};
   Image3D mat_img{};
   Image3D occ_l1_img{};
@@ -570,7 +575,6 @@ int run() {
     VK_CHECK(vkCreateImageView(device.device(), &ovi, nullptr,
                                occ_storage_view.init(device.device())));
 
-    const uint32_t N1 = N / 4;
     occ_l1_img =
         create_image3d(allocator.raw(), N1, N1, N1, VK_FORMAT_R8_UINT,
                        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
@@ -596,6 +600,9 @@ int run() {
   vubo.max = {static_cast<float>(N), static_cast<float>(N),
               static_cast<float>(N)};
   vubo.dim = {static_cast<int>(N), static_cast<int>(N), static_cast<int>(N)};
+  vubo.occL1Dim = {static_cast<int>(N1), static_cast<int>(N1), static_cast<int>(N1)};
+  vubo.occL1CellSize =
+      (vubo.max - vubo.min) / glm::vec3(vubo.occL1Dim);
   upload_buffer(allocator.raw(), transfer, device.graphics_queue(), vox_buf,
                 &vubo, sizeof(vubo));
 

@@ -18,6 +18,8 @@ layout(set=0, binding=1, std140) uniform VoxelAABB {
     vec3 min; float pad0;
     vec3 max; float pad1;
     ivec3 dim; int pad2;
+    ivec3 occL1Dim; int pad3;
+    vec3 occL1CellSize; float pad4;
 } vox;
 
 layout(set=0, binding=2) uniform usampler3D uOccTex;
@@ -98,10 +100,10 @@ bool gridRaycast(Ray r, out ivec3 cell, out int hitFace, out float tHit, out int
     float t = max(t0, 0.0);
     vec3 pos = r.o + t * r.d;
 
-    ivec3 dim1 = textureSize(uOccTexL1, 0);
-    vec3 cellSize = (vox.max - vox.min) / vec3(dim1);
-    vec3 rel = (pos - vox.min) / (vox.max - vox.min);
-    ivec3 cell1 = ivec3(clamp(floor(rel * vec3(dim1)), vec3(0.0), vec3(dim1) - vec3(1.0)));
+    ivec3 dim1 = vox.occL1Dim;
+    vec3 cellSize = vox.occL1CellSize;
+    vec3 cellf = (pos - vox.min) / cellSize;
+    ivec3 cell1 = ivec3(clamp(floor(cellf), vec3(0.0), vec3(dim1) - vec3(1.0)));
     ivec3 step = ivec3(greaterThan(r.d, vec3(0.0))) * 2 - ivec3(1);
     vec3 next = vox.min + (vec3(cell1) + (vec3(step) + 1.0) * 0.5) * cellSize;
     vec3 tMax = (next - pos) / r.d;
