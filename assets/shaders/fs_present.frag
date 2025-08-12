@@ -122,9 +122,10 @@ void main() {
     vec3 col = vec3(0.0);
     if (gridRaycast(r, cell, face)) {
         uint m = texelFetch(uMatTex, cell, 0).r;
-        if(m == 1u) col = vec3(0.55,0.27,0.07); // terrain
-        else if(m == 2u) col = vec3(0.1,0.8,0.1); // tree
-        else col = vec3(1.0);
+        if(m == 1u)      col = vec3(0.55,0.27,0.07); // terrain
+        else if(m == 2u) col = vec3(0.1,0.8,0.1);    // foliage
+        else if(m == 3u) col = vec3(0.5,0.5,0.5);    // rock
+        else             col = vec3(1.0);
     }
     outColor = vec4(col, 1.0);
 }
