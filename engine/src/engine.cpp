@@ -67,9 +67,9 @@ static void record_textured(VkCommandBuffer cmd, VkImage, VkImageView view,
   // Flipped viewport (negative height to keep winding consistent)
   VkViewport vp{};
   vp.x = 0.0f;
-  vp.y = extent.height;
+  vp.y = static_cast<float>(extent.height);
   vp.width  = static_cast<float>(extent.width);
-  vp.height = -float(extent.height);
+  vp.height = -static_cast<float>(extent.height);
   vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
   vkCmdSetViewport(cmd, 0, 1, &vp);
 
@@ -78,7 +78,8 @@ static void record_textured(VkCommandBuffer cmd, VkImage, VkImageView view,
 
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipe->pipeline());
 
-  float aspect = extent.width / (extent.height > 0 ? float(extent.height) : 1.0f);
+  float aspect = static_cast<float>(extent.width) /
+                 (extent.height > 0 ? static_cast<float>(extent.height) : 1.0f);
   vkCmdPushConstants(cmd, ctx->pipe->layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float), &aspect);
 
   VkBuffer vbos[] = { ctx->vbo };
@@ -259,6 +260,7 @@ int run() {
   destroy_image2d(allocator.raw(), img);
   destroy_buffer(allocator.raw(), ibo);
   destroy_buffer(allocator.raw(), vbo);
+  destroy_transfer_context();
   allocator.destroy();
 
   spdlog::info("Shutdown.");

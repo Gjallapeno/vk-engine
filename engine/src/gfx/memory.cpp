@@ -257,9 +257,21 @@ void upload_image2d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
   si.pCommandBuffers = &g_transfer.cmd;
   VK_CHECK(vkResetFences(device, 1, &g_transfer.fence));
   VK_CHECK(vkQueueSubmit(queue, 1, &si, g_transfer.fence));
-  VK_CHECK(vkWaitForFences(device, 1, &g_transfer.fence, VK_TRUE, UINT64_MAX));
+    VK_CHECK(vkWaitForFences(device, 1, &g_transfer.fence, VK_TRUE, UINT64_MAX));
 
-  vmaDestroyBuffer(alloc, stagingBuf, stagingAlloc);
+    vmaDestroyBuffer(alloc, stagingBuf, stagingAlloc);
+  }
+
+void destroy_transfer_context() {
+  if (!g_transfer.pool && !g_transfer.fence)
+    return;
+  if (g_transfer.cmd)
+    vkFreeCommandBuffers(g_transfer.device, g_transfer.pool, 1, &g_transfer.cmd);
+  if (g_transfer.pool)
+    vkDestroyCommandPool(g_transfer.device, g_transfer.pool, nullptr);
+  if (g_transfer.fence)
+    vkDestroyFence(g_transfer.device, g_transfer.fence, nullptr);
+  g_transfer = {};
 }
 
 } // namespace engine
