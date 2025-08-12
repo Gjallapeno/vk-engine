@@ -257,14 +257,17 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
 
   vkCmdBeginRendering(cmd, &gi);
 
-  VkViewport vp{};
-  vp.x = 0.0f;
-  vp.y = static_cast<float>(ctx->ray_extent.height);
-  vp.width  = static_cast<float>(ctx->ray_extent.width);
-  vp.height = -static_cast<float>(ctx->ray_extent.height);
-  vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
-  vkCmdSetViewport(cmd, 0, 1, &vp);
-  VkRect2D sc{ {0,0}, ctx->ray_extent }; vkCmdSetScissor(cmd, 0, 1, &sc);
+  // Geometry pass renders the voxel scene at reduced resolution (ray_extent)
+  VkViewport vp_lo{};
+  vp_lo.x = 0.0f;
+  vp_lo.y = static_cast<float>(ctx->ray_extent.height);
+  vp_lo.width  = static_cast<float>(ctx->ray_extent.width);
+  vp_lo.height = -static_cast<float>(ctx->ray_extent.height);
+  vp_lo.minDepth = 0.0f;
+  vp_lo.maxDepth = 1.0f;
+  vkCmdSetViewport(cmd, 0, 1, &vp_lo);
+  VkRect2D sc_lo{ {0,0}, ctx->ray_extent };
+  vkCmdSetScissor(cmd, 0, 1, &sc_lo);
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->ray_pipe->pipeline());
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->ray_pipe->layout(),
                           0, 1, &ctx->ray_dset, 0, nullptr);
@@ -341,9 +344,21 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   ri.colorAttachmentCount = 1;
   ri.pColorAttachments = &color;
 
+  // Final lighting/present pass upscales to the swapchain extent
   vkCmdBeginRendering(cmd, &ri);
-  vkCmdSetViewport(cmd, 0, 1, &vp);
-  vkCmdSetScissor(cmd, 0, 1, &sc);
+
+  VkViewport vp_hi{};
+  vp_hi.x = 0.0f;
+  vp_hi.y = static_cast<float>(extent.height);
+  vp_hi.width  = static_cast<float>(extent.width);
+  vp_hi.height = -static_cast<float>(extent.height);
+  vp_hi.minDepth = 0.0f;
+  vp_hi.maxDepth = 1.0f;
+  vkCmdSetViewport(cmd, 0, 1, &vp_hi);
+
+  VkRect2D sc_hi{ {0,0}, extent };
+  vkCmdSetScissor(cmd, 0, 1, &sc_hi);
+
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->light_pipe->pipeline());
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->light_pipe->layout(),
                           0, 1, &ctx->light_dset, 0, nullptr);
