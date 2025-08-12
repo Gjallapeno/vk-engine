@@ -27,6 +27,8 @@ layout(set=0, binding=6) uniform usampler3D uOccTexL1;
 layout(set=0, binding=7, r32ui) uniform uimage2D stepsImg;
 
 const int STEPS_SCALE = 4;
+// Define sun direction as the direction light RAYS travel (sky → ground)
+const vec3 sunDir = normalize(vec3(-0.5, -1.0, -0.3));
 
 struct Ray { vec3 o; vec3 d; };
 
@@ -98,14 +100,19 @@ void main() {
         outColor = vec4(albedo, 1.0);
         return;
     }
-    vec3 lightDir = normalize(vec3(-0.5, -1.0, -0.3));
     vec2 rp = gl_FragCoord.xy / cam.outputResolution * cam.renderResolution;
     Ray viewRay = makeRay(rp);
     vec3 pos = viewRay.o + viewRay.d * depth;
-    vec3 L = normalize(-lightDir);
-    float vis = shadowVisibilityL0(pos, normal, L);
+    // For Lambert, we need a vector from POINT → LIGHT
+    vec3 L = -sunDir;
+
+    // TEMP: ignore visibility, just Lambert
     float ndl = max(dot(normal, L), 0.0);
-    vec3 color = albedo * ndl * vis;
+    vec3 color = albedo * ndl;
+
+    // Debug: show ndl and normal quickly
     if (cam.debugNormals > 0.5) color = normal * 0.5 + 0.5;
+    if (cam.debugSteps   > 0.5) color = vec3(ndl);
+
     outColor = vec4(color, 1.0);
 }
