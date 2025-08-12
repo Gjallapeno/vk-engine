@@ -130,6 +130,23 @@ bool gridRaycast(Ray r, out int stepsL1, out int stepsL0) {
     return false;
 }
 
+// Returns 1.0 if light is visible, 0.0 if occluded
+float shadowVisibility(vec3 P, vec3 N, vec3 L, out int stepsL1, out int stepsL0) {
+    stepsL1 = 0;
+    stepsL0 = 0;
+
+    // Backfaces don't receive light
+    float NdotL = dot(N, L);
+    if (NdotL <= 0.0) return 0.0;
+
+    // Offset start to avoid self-occlusion
+    const float eps = 0.501;
+    Ray r; r.o = P + N * eps; r.d = L;
+
+    bool hit = gridRaycast(r, stepsL1, stepsL0);
+    return hit ? 0.0 : 1.0;
+}
+
 void main() {
     vec2 uv = gl_FragCoord.xy / cam.outputResolution;
     vec3 albedo = texture(gAlbedoRough, uv).rgb;
@@ -146,16 +163,15 @@ void main() {
     vec3 lightDir = normalize(vec3(-0.5, -1.0, -0.3));
     vec2 rp = gl_FragCoord.xy / cam.outputResolution * cam.renderResolution;
     Ray viewRay = makeRay(rp);
-    vec3 pos = viewRay.o + viewRay.d * depth + normal * 0.001;
-    Ray shadowRay; shadowRay.o = pos; shadowRay.d = -lightDir;
+    vec3 pos = viewRay.o + viewRay.d * depth;
+    vec3 L = normalize(-lightDir);
     int steps1; int steps0;
-    bool occluded = gridRaycast(shadowRay, steps1, steps0);
+    float vis = shadowVisibility(pos, normal, L, steps1, steps0);
     int totalSteps = steps0 + steps1;
     ivec2 coord = ivec2(gl_FragCoord.xy) / STEPS_SCALE;
     imageAtomicAdd(stepsImg, coord, uint(totalSteps));
-    float ndl = max(dot(normal, -lightDir), 0.0);
-    float shadow = occluded ? 0.0 : 1.0;
-    vec3 color = albedo * ndl * shadow;
+    float ndl = max(dot(normal, L), 0.0);
+    vec3 color = albedo * ndl * vis;
     if (cam.debugNormals > 0.5) color = normal * 0.5 + 0.5;
     if (cam.debugSteps > 0.5) color = vec3(float(totalSteps) * 0.02);
     outColor = vec4(color, 1.0);
