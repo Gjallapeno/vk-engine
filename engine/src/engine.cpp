@@ -28,7 +28,8 @@
 #include <glm/gtc/matrix_inverse.hpp>
 
 #ifdef _WIN32
-  #include <windows.h>
+#  define NOMINMAX
+#  include <windows.h>
 #endif
 
 namespace engine {
