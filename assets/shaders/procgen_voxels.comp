@@ -1,0 +1,38 @@
+#version 460
+layout (local_size_x=8, local_size_y=8, local_size_z=8) in;
+
+layout (r8ui, binding=0) writeonly uniform uimage3D occOut;
+
+layout (std140, binding=1) uniform VoxParams {
+    ivec3 dim;   int frame;
+    vec3  volMin; float pad0;
+    vec3  volMax; float pad1;
+    // shape params
+    vec3 boxA; float pad2;
+    vec3 boxB; float pad3;
+    vec3 sphereCenter; float sphereRadius;
+} P;
+
+void main(){
+    ivec3 p = ivec3(gl_GlobalInvocationID.xyz);
+    if (any(greaterThanEqual(p, P.dim))) return;
+
+    // Example: union of a box and a sphere (both in voxel coordinates)
+    uint v = 0u;
+
+    // Box test
+    bvec3 inA = greaterThanEqual(p, ivec3(floor(P.boxA)));
+    bvec3 inB = lessThanEqual   (p, ivec3(floor(P.boxB)));
+    if (all(inA) && all(inB)) v = 1u;
+
+    // Sphere test
+    vec3  pf = vec3(p) + 0.5;
+    float d2 = dot(pf - P.sphereCenter, pf - P.sphereCenter);
+    if (d2 <= P.sphereRadius * P.sphereRadius) v = 1u;
+
+    // (Optional) animated noise cutout
+    // float n = noise3D(pf*0.08 + vec3(P.frame*0.02));
+    // if (n < 0.45) v = 0u;
+
+    imageStore(occOut, p, uvec4(v,0,0,0));
+}
