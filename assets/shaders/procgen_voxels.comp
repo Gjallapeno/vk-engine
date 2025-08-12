@@ -88,13 +88,22 @@ void main(){
     }else if(P.mode == MODE_TERRAIN){
         float h = fbm(pf.xz * P.terrainFreq) * 20.0 + 20.0;
         if(pf.y < h){ shape = 1u; shapeMat = 1u; }
+
+        // Scatter additional features based on 16x16 cells in the XZ plane.
         vec2 cell2 = floor(pf.xz / 16.0);
         float tn = hash(cell2, float(P.noiseSeed));
         if(tn > 0.85){
+            // Simple foliage clumps
             vec2 center2 = cell2 * 16.0 + 8.0;
             float th = fbm(center2 * P.terrainFreq) * 20.0 + 20.0;
             vec3 tc = vec3(center2.x, th + 6.0, center2.y);
             if(distance(pf, tc) < 3.0){ shape = 1u; shapeMat = 2u; }
+        }else if(tn > 0.75){
+            // Rock outcrops
+            vec2 center2 = cell2 * 16.0 + 8.0;
+            float th = fbm(center2 * P.terrainFreq) * 20.0 + 20.0;
+            vec3 rc = vec3(center2.x, th + 2.0, center2.y);
+            if(distance(pf, rc) < 2.0){ shape = 1u; shapeMat = 3u; }
         }
     }
 
