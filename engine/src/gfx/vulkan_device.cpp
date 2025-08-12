@@ -131,8 +131,6 @@ void VulkanDevice::create_logical(bool enable_validation) {
     vkGetPhysicalDeviceFeatures(phys_, &supported);
     if (supported.samplerAnisotropy)
       feats.samplerAnisotropy = VK_TRUE;
-    if (supported.fragmentStoresAndAtomics)
-      feats.fragmentStoresAndAtomics = VK_TRUE;
   
     // Dynamic rendering feature
     VkPhysicalDeviceDynamicRenderingFeatures dyn{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES };
