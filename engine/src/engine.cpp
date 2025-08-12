@@ -495,7 +495,8 @@ int run() {
 
   GpuAllocator allocator;
   allocator.init(instance.vk(), device.physical(), device.device());
-  TransferContext transfer{device.device(), device.graphics_family()};
+  TransferContext transfer{device.device(), device.graphics_family(),
+                           allocator.raw()};
 
   // Samplers for sampled images
   UniqueSampler linear_sampler;

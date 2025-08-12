@@ -1,20 +1,51 @@
 #pragma once
 #include <cstdint>
+#include <deque>
 #include <vk_mem_alloc.h>
 #include <vulkan/vulkan.h>
 
 namespace engine {
 
+// -------- Buffers --------
+struct Buffer {
+  VkBuffer buffer = VK_NULL_HANDLE;
+  VmaAllocation allocation = nullptr;
+  VkDeviceSize size = 0;
+};
+
 // Owns resources required for one-off transfer operations.
 class TransferContext {
 public:
-  TransferContext(VkDevice device, uint32_t queue_family);
+  static constexpr VkDeviceSize kBufferSize = 8 * 1024 * 1024;
+
+  TransferContext(VkDevice device, uint32_t queue_family,
+                  VmaAllocator allocator);
   ~TransferContext();
+
+  // Allocate 'bytes' from the ring buffer, returning a pointer to the mapped
+  // memory and the offset within the Vulkan buffer.
+  void *allocate(size_t bytes, VkDeviceSize &offset);
+  // Check for completed uploads and reclaim memory.
+  void release_completed();
+  // Record a submitted region guarded by 'fence'.
+  void mark_submitted(VkFence fence, VkDeviceSize offset, VkDeviceSize size);
 
   VkDevice device = VK_NULL_HANDLE;
   VkCommandPool pool = VK_NULL_HANDLE;
   VkCommandBuffer cmd = VK_NULL_HANDLE;
-  VkFence fence = VK_NULL_HANDLE;
+  Buffer staging{};
+
+private:
+  VmaAllocator allocator_ = nullptr;
+  uint8_t *mapped_ = nullptr;
+  VkDeviceSize head_ = 0;
+  VkDeviceSize tail_ = 0;
+  struct Pending {
+    VkFence fence;
+    VkDeviceSize start;
+    VkDeviceSize end;
+  };
+  std::deque<Pending> pending_;
 };
 
 // Simple RAII wrapper for VMA
@@ -30,13 +61,6 @@ public:
 
 private:
   VmaAllocator alloc_ = nullptr;
-};
-
-// -------- Buffers --------
-struct Buffer {
-  VkBuffer buffer = VK_NULL_HANDLE;
-  VmaAllocation allocation = nullptr;
-  VkDeviceSize size = 0;
 };
 
 Buffer create_buffer(VmaAllocator alloc, VkDeviceSize size,
