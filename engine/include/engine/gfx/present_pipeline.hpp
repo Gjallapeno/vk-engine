@@ -12,8 +12,11 @@ struct PresentPipelineCreateInfo {
   std::string fs_spv;
 };
 
-// Graphics pipeline for a fullscreen triangle sampling a texture.
-// Descriptor set layout: set0,binding0 combined image sampler.
+// Graphics pipeline for a fullscreen triangle performing voxel raycasting.
+// Descriptor set layout:
+//   set0,binding0 uniform buffer    (CameraUBO)
+//   set0,binding1 uniform buffer    (VoxelAABB)
+//   set0,binding2 combined sampler  (3D occupancy texture)
 class PresentPipeline {
 public:
   explicit PresentPipeline(const PresentPipelineCreateInfo& ci);
