@@ -27,8 +27,6 @@ layout(set=0, binding=6) uniform usampler3D uOccTexL1;
 layout(set=0, binding=7, r32ui) writeonly uniform uimage2D stepsImg;
 
 const int STEPS_SCALE = 4;
-const int MAX_ITERS = 2048;
-const float T_MAX = 1e6;
 
 struct Ray { vec3 o; vec3 d; };
 
@@ -62,7 +60,7 @@ bool gridRaycastL0(Ray r, out int steps) {
     vec3 next = vox.min + (vec3(cell) + (vec3(step)+1.0)*0.5) * cellSize;
     vec3 tMax = (next - pos) / r.d;
     vec3 tDelta = cellSize / abs(r.d);
-    for(int i=0; i<MAX_ITERS && t <= T_MAX; ++i){
+    for(int i=0;i<1024;i++){
         if(any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, vox.dim))) break;
         steps++;
         if(texelFetch(uOccTex, cell, 0).r > 0u) return true;
@@ -105,8 +103,7 @@ bool gridRaycast(Ray r, out int stepsL1, out int stepsL0) {
         if(texelFetch(uOccTexL1, cell1, 0).r > 0u){
             Ray r2; r2.o = pos; r2.d = r.d;
             bool hit = gridRaycastL0(r2, stepsL0);
-            if(hit) return true;
-            // continue L1 traversal when L0 misses
+            if(hit) return true; else return false;
         }
         stepsL1++;
         if(tMax.x < tMax.y){
@@ -131,31 +128,22 @@ void main() {
     vec3 normal = texture(gNormal, uv).xyz;
     float depth = texture(gDepth, uv).r;
     vec3 lightDir = normalize(vec3(-0.5, -1.0, -0.3));
-    float ndl = dot(normal, -lightDir);
+    float ndl = max(dot(normal, -lightDir), 0.0);
     float vis = 1.0;
     if(ndl > 0.0){
-        float t = depth;
-        if(t > 0.0){
-            vec2 rp = uv * cam.renderResolution;
-            Ray viewRay = makeRay(rp);
-            vec3 pos = viewRay.o + viewRay.d * t;
-
-            vec3 voxelSize = (vox.max - vox.min) / vec3(vox.dim);
-            float bias = max(voxelSize.x, max(voxelSize.y, voxelSize.z)) * 0.51;
-            pos += normalize(normal) * bias;
-
-            Ray sh; sh.o = pos; sh.d = normalize(-lightDir);
-
-            int s1 = 0, s0 = 0;
-            bool hit = gridRaycast(sh, s1, s0);
-            #ifdef LOG_STEPS
-            ivec2 coord = ivec2(gl_FragCoord.xy) / STEPS_SCALE;
-            imageAtomicAdd(stepsImg, coord, uint(s0 + s1));
-            #endif
-            vis = hit ? 0.0 : 1.0;
-        }
+        vec2 rp = uv * cam.renderResolution;
+        Ray viewRay = makeRay(rp);
+        vec3 pos = viewRay.o + viewRay.d * depth;
+        pos += normal * 0.001;
+        Ray sh; sh.o = pos; sh.d = -lightDir;
+        int s1; int s0;
+        bool hit = gridRaycast(sh, s1, s0);
+        int totalSteps = s0 + s1;
+        ivec2 coord = ivec2(gl_FragCoord.xy) / STEPS_SCALE;
+        imageStore(stepsImg, coord, uvec4(uint(totalSteps),0,0,0));
+        if(hit) vis = 0.0;
     }
-    vec3 color = albedo * max(ndl, 0.0) * vis;
+    vec3 color = albedo * ndl * vis;
     if (cam.debugNormals > 0.5) color = normal * 0.5 + 0.5;
     outColor = vec4(color, 1.0);
 }
