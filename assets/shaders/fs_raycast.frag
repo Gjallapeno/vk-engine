@@ -1,11 +1,13 @@
 #version 460
-layout(location=0) out vec4 outColor;
+layout(location=0) out vec4 outAlbedoRough;
+layout(location=1) out vec4 outNormal;
+layout(location=2) out float outDepth;
 
 layout(set=0, binding=0, std140) uniform Camera {
     mat4 invViewProj;
     vec2 resolution;
     float time;
-    float _pad;
+    float debugNormals; // reused in lighting pass
 } cam;
 
 layout(set=0, binding=1, std140) uniform VoxelAABB {
@@ -30,7 +32,7 @@ Ray makeRay(vec2 p) {
 }
 
 // Fine DDA on the full-resolution voxel grid
-bool gridRaycastL0(Ray r, out ivec3 cell, out int hitFace) {
+bool gridRaycastL0(Ray r, out ivec3 cell, out int hitFace, out float tHit) {
     vec3 invD = 1.0 / r.d;
     vec3 t0s = (vox.min - r.o) * invD;
     vec3 t1s = (vox.max - r.o) * invD;
@@ -53,26 +55,27 @@ bool gridRaycastL0(Ray r, out ivec3 cell, out int hitFace) {
     hitFace = -1;
     for(int i=0;i<1024;i++){
         if(any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, vox.dim))) break;
-        if(texelFetch(uOccTex, cell, 0).r > 0u) return true;
+        if(texelFetch(uOccTex, cell, 0).r > 0u){ tHit = t; return true; }
         if(tMax.x < tMax.y){
             if(tMax.x < tMax.z){
-                cell.x += step.x; tMax.x += tDelta.x; hitFace = step.x > 0 ? 0 : 1;
+                cell.x += step.x; t = tMax.x; tMax.x += tDelta.x; hitFace = step.x > 0 ? 0 : 1;
             }else{
-                cell.z += step.z; tMax.z += tDelta.z; hitFace = step.z > 0 ? 4 : 5;
+                cell.z += step.z; t = tMax.z; tMax.z += tDelta.z; hitFace = step.z > 0 ? 4 : 5;
             }
         }else{
             if(tMax.y < tMax.z){
-                cell.y += step.y; tMax.y += tDelta.y; hitFace = step.y > 0 ? 2 : 3;
+                cell.y += step.y; t = tMax.y; tMax.y += tDelta.y; hitFace = step.y > 0 ? 2 : 3;
             }else{
-                cell.z += step.z; tMax.z += tDelta.z; hitFace = step.z > 0 ? 4 : 5;
+                cell.z += step.z; t = tMax.z; tMax.z += tDelta.z; hitFace = step.z > 0 ? 4 : 5;
             }
         }
+        pos = r.o + t * r.d;
     }
     return false;
 }
 
 // Traverse coarse L1 occupancy first, then descend to L0 if needed
-bool gridRaycast(Ray r, out ivec3 cell, out int hitFace) {
+bool gridRaycast(Ray r, out ivec3 cell, out int hitFace, out float tHit) {
     vec3 invD = 1.0 / r.d;
     vec3 t0s = (vox.min - r.o) * invD;
     vec3 t1s = (vox.max - r.o) * invD;
@@ -96,7 +99,9 @@ bool gridRaycast(Ray r, out ivec3 cell, out int hitFace) {
         if(any(lessThan(cell1, ivec3(0))) || any(greaterThanEqual(cell1, dim1))) break;
         if(texelFetch(uOccTexL1, cell1, 0).r > 0u){
             Ray r2; r2.o = pos; r2.d = r.d;
-            return gridRaycastL0(r2, cell, hitFace);
+            float tLocal;
+            bool hit = gridRaycastL0(r2, cell, hitFace, tLocal);
+            if(hit){ tHit = t + tLocal; return true; } else return false;
         }
         if(tMax.x < tMax.y){
             if(tMax.x < tMax.z){
@@ -118,14 +123,25 @@ bool gridRaycast(Ray r, out ivec3 cell, out int hitFace) {
 
 void main() {
     Ray r = makeRay(gl_FragCoord.xy);
-    ivec3 cell; int face;
-    vec3 col = vec3(0.0);
-    if (gridRaycast(r, cell, face)) {
+    ivec3 cell; int face; float t;
+    vec3 albedo = vec3(0.0);
+    vec3 normal = vec3(0.0);
+    float depth = 0.0;
+    if (gridRaycast(r, cell, face, t)) {
         uint m = texelFetch(uMatTex, cell, 0).r;
-        if(m == 1u)      col = vec3(0.55,0.27,0.07); // terrain
-        else if(m == 2u) col = vec3(0.1,0.8,0.1);    // foliage
-        else if(m == 3u) col = vec3(0.5,0.5,0.5);    // rock
-        else             col = vec3(1.0);
+        if(m == 1u)      albedo = vec3(0.55,0.27,0.07); // terrain
+        else if(m == 2u) albedo = vec3(0.1,0.8,0.1);    // foliage
+        else if(m == 3u) albedo = vec3(0.5,0.5,0.5);    // rock
+        else             albedo = vec3(1.0);
+        if(face == 0)      normal = vec3(1,0,0);
+        else if(face == 1) normal = vec3(-1,0,0);
+        else if(face == 2) normal = vec3(0,1,0);
+        else if(face == 3) normal = vec3(0,-1,0);
+        else if(face == 4) normal = vec3(0,0,1);
+        else if(face == 5) normal = vec3(0,0,-1);
+        depth = t;
     }
-    outColor = vec4(col, 1.0);
+    outAlbedoRough = vec4(albedo, 0.0);
+    outNormal = vec4(normal, 0.0);
+    outDepth = depth;
 }

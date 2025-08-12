@@ -10,6 +10,7 @@ add_library(engine STATIC
   src/gfx/vulkan_commands.cpp
   src/gfx/vulkan_pipeline.cpp
   src/gfx/present_pipeline.cpp
+  src/gfx/ray_pipeline.cpp
   src/gfx/memory.cpp  # empty TU, utilities are header-only
   src/platform/glfw_window.cpp
 )
