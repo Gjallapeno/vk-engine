@@ -27,7 +27,7 @@ VkShaderModule TrianglePipeline::load_module(const std::string& path) {
 }
 
 TrianglePipeline::TrianglePipeline(const TrianglePipelineCreateInfo& ci)
-  : dev_(ci.device), color_format_(ci.color_format)
+  : dev_(ci.device), color_format_(ci.color_format), depth_format_(ci.depth_format)
 {
   // Descriptor set layout: set0, binding0 = combined image sampler (fragment)
   VkDescriptorSetLayoutBinding sam{};
@@ -67,16 +67,16 @@ TrianglePipeline::TrianglePipeline(const TrianglePipelineCreateInfo& ci)
   stages[1].module = fs;
   stages[1].pName  = "main";
 
-  // Vertex: binding0 -> vec2 pos, vec2 uv
+  // Vertex: binding0 -> vec3 pos, vec2 uv
   VkVertexInputBindingDescription bind{};
-  bind.binding = 0; bind.stride = sizeof(float) * 4;
+  bind.binding = 0; bind.stride = sizeof(float) * 5;
   bind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
   VkVertexInputAttributeDescription attrs[2]{};
   attrs[0].location = 0; attrs[0].binding = 0;
-  attrs[0].format = VK_FORMAT_R32G32_SFLOAT; attrs[0].offset = 0;
+  attrs[0].format = VK_FORMAT_R32G32B32_SFLOAT; attrs[0].offset = 0;
   attrs[1].location = 1; attrs[1].binding = 0;
-  attrs[1].format = VK_FORMAT_R32G32_SFLOAT; attrs[1].offset = sizeof(float) * 2;
+  attrs[1].format = VK_FORMAT_R32G32_SFLOAT; attrs[1].offset = sizeof(float) * 3;
 
   VkPipelineVertexInputStateCreateInfo vin{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
   vin.vertexBindingDescriptionCount = 1;
@@ -99,6 +99,11 @@ TrianglePipeline::TrianglePipeline(const TrianglePipelineCreateInfo& ci)
   VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
   ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
+  VkPipelineDepthStencilStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+  ds.depthTestEnable = VK_TRUE;
+  ds.depthWriteEnable = VK_TRUE;
+  ds.depthCompareOp = VK_COMPARE_OP_LESS;
+
   VkPipelineColorBlendAttachmentState cbAtt{};
   cbAtt.colorWriteMask = VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT|
                          VK_COLOR_COMPONENT_B_BIT|VK_COLOR_COMPONENT_A_BIT;
@@ -114,6 +119,7 @@ TrianglePipeline::TrianglePipeline(const TrianglePipelineCreateInfo& ci)
   VkFormat colorFmt = color_format_;
   renderInfo.colorAttachmentCount = 1;
   renderInfo.pColorAttachmentFormats = &colorFmt;
+  renderInfo.depthAttachmentFormat = depth_format_;
 
   VkGraphicsPipelineCreateInfo gpc{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
   gpc.pNext = &renderInfo;
@@ -124,6 +130,7 @@ TrianglePipeline::TrianglePipeline(const TrianglePipelineCreateInfo& ci)
   gpc.pRasterizationState = &rs;
   gpc.pMultisampleState   = &ms;
   gpc.pColorBlendState    = &cb;
+  gpc.pDepthStencilState  = &ds;
   gpc.pDynamicState       = &dyn;
   gpc.layout = layout_;
   gpc.renderPass = VK_NULL_HANDLE; gpc.subpass = 0;
