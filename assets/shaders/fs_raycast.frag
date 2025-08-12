@@ -8,6 +8,9 @@ layout(set=0, binding=0, std140) uniform Camera {
     vec2 resolution;
     float time;
     float debugNormals; // reused in lighting pass
+    float debugLevel;
+    float debugSteps;
+    vec2 pad0;
 } cam;
 
 layout(set=0, binding=1, std140) uniform VoxelAABB {
@@ -19,6 +22,9 @@ layout(set=0, binding=1, std140) uniform VoxelAABB {
 layout(set=0, binding=2) uniform usampler3D uOccTex;
 layout(set=0, binding=3) uniform usampler3D uMatTex;
 layout(set=0, binding=4) uniform usampler3D uOccTexL1;
+layout(set=0, binding=5, r32ui) uniform uimage2D stepsImg;
+
+const int STEPS_SCALE = 4;
 
 struct Ray { vec3 o; vec3 d; };
 
@@ -32,7 +38,8 @@ Ray makeRay(vec2 p) {
 }
 
 // Fine DDA on the full-resolution voxel grid
-bool gridRaycastL0(Ray r, out ivec3 cell, out int hitFace, out float tHit) {
+bool gridRaycastL0(Ray r, out ivec3 cell, out int hitFace, out float tHit, out int steps) {
+    steps = 0;
     vec3 invD = 1.0 / r.d;
     vec3 t0s = (vox.min - r.o) * invD;
     vec3 t1s = (vox.max - r.o) * invD;
@@ -55,6 +62,7 @@ bool gridRaycastL0(Ray r, out ivec3 cell, out int hitFace, out float tHit) {
     hitFace = -1;
     for(int i=0;i<1024;i++){
         if(any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, vox.dim))) break;
+        steps++;
         if(texelFetch(uOccTex, cell, 0).r > 0u){ tHit = t; return true; }
         if(tMax.x < tMax.y){
             if(tMax.x < tMax.z){
@@ -75,7 +83,9 @@ bool gridRaycastL0(Ray r, out ivec3 cell, out int hitFace, out float tHit) {
 }
 
 // Traverse coarse L1 occupancy first, then descend to L0 if needed
-bool gridRaycast(Ray r, out ivec3 cell, out int hitFace, out float tHit) {
+bool gridRaycast(Ray r, out ivec3 cell, out int hitFace, out float tHit, out int stepsL1, out int stepsL0) {
+    stepsL1 = 0;
+    stepsL0 = 0;
     vec3 invD = 1.0 / r.d;
     vec3 t0s = (vox.min - r.o) * invD;
     vec3 t1s = (vox.max - r.o) * invD;
@@ -99,10 +109,12 @@ bool gridRaycast(Ray r, out ivec3 cell, out int hitFace, out float tHit) {
         if(any(lessThan(cell1, ivec3(0))) || any(greaterThanEqual(cell1, dim1))) break;
         if(texelFetch(uOccTexL1, cell1, 0).r > 0u){
             Ray r2; r2.o = pos; r2.d = r.d;
-            float tLocal;
-            bool hit = gridRaycastL0(r2, cell, hitFace, tLocal);
+            float tLocal; int s0;
+            bool hit = gridRaycastL0(r2, cell, hitFace, tLocal, s0);
+            stepsL0 += s0;
             if(hit){ tHit = t + tLocal; return true; } else return false;
         }
+        stepsL1++;
         if(tMax.x < tMax.y){
             if(tMax.x < tMax.z){
                 cell1.x += step.x; t = tMax.x; tMax.x += tDelta.x;
@@ -123,11 +135,11 @@ bool gridRaycast(Ray r, out ivec3 cell, out int hitFace, out float tHit) {
 
 void main() {
     Ray r = makeRay(gl_FragCoord.xy);
-    ivec3 cell; int face; float t;
+    ivec3 cell; int face; float t; int steps1; int steps0;
     vec3 albedo = vec3(0.0);
     vec3 normal = vec3(0.0);
     float depth = 0.0;
-    if (gridRaycast(r, cell, face, t)) {
+    if (gridRaycast(r, cell, face, t, steps1, steps0)) {
         uint m = texelFetch(uMatTex, cell, 0).r;
         if(m == 1u)      albedo = vec3(0.55,0.27,0.07); // terrain
         else if(m == 2u) albedo = vec3(0.1,0.8,0.1);    // foliage
@@ -141,7 +153,13 @@ void main() {
         else if(face == 5) normal = vec3(0,0,-1);
         depth = t;
     }
-    outAlbedoRough = vec4(albedo, 0.0);
+    int totalSteps = steps0 + steps1;
+    ivec2 coord = ivec2(gl_FragCoord.xy) / STEPS_SCALE;
+    imageAtomicAdd(stepsImg, coord, uint(totalSteps));
+    vec3 color = albedo;
+    if(cam.debugLevel > 0.5) color = (steps0 > 0) ? vec3(0,1,0) : vec3(1,0,0);
+    if(cam.debugSteps > 0.5) color = vec3(float(totalSteps) * 0.02);
+    outAlbedoRough = vec4(color, 0.0);
     outNormal = vec4(normal, 0.0);
     outDepth = depth;
 }

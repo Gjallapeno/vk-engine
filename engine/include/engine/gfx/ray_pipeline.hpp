@@ -18,6 +18,7 @@ struct RayPipelineCreateInfo {
 //   set0,binding2 combined sampler  (L0 occupancy texture)
 //   set0,binding3 combined sampler  (material texture)
 //   set0,binding4 combined sampler  (L1 occupancy texture)
+//   set0,binding5 storage image    (step count image)
 class RayPipeline {
 public:
   explicit RayPipeline(const RayPipelineCreateInfo& ci);

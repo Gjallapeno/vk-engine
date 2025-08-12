@@ -29,6 +29,9 @@ struct Buffer {
 
 Buffer create_buffer(VmaAllocator alloc, VkDeviceSize size,
                      VkBufferUsageFlags usage);
+// Host-visible buffer intended for readback/cpu access.
+Buffer create_host_buffer(VmaAllocator alloc, VkDeviceSize size,
+                          VkBufferUsageFlags usage);
 void destroy_buffer(VmaAllocator alloc, Buffer &buf);
 // Upload using a dedicated transfer command buffer on 'queue_family' using
 // 'queue'.
