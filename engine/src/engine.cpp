@@ -298,6 +298,7 @@ int run() {
     sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; sizes[0].descriptorCount = 1;
     sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; sizes[1].descriptorCount = 1;
     VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     dpci.maxSets = 1; dpci.poolSizeCount = 2; dpci.pPoolSizes = sizes;
     VK_CHECK(vkCreateDescriptorPool(device.device(), &dpci, nullptr, &comp_pool));
 
