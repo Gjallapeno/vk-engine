@@ -52,34 +52,45 @@ bool aabbHit(vec3 ro, vec3 rd, vec3 vmin, vec3 vmax, out float t0, out float t1)
     return t1 > max(t0, 0.0);
 }
 
-// Assumes P is already outside the surface (caller applied offsets)
-float shadowVisibilityL0_fromOutside(vec3 P, vec3 L) {
+// Robust L0 shadow test that advances into the next voxel before sampling
+float shadowVisibilityL0_advanceFirst(vec3 P, vec3 L) {
     float t0, t1;
-    if (!aabbHit(P, L, vox.min, vox.max, t0, t1)) return 1.0; // leaves volume → lit
+    if (!aabbHit(P, L, vox.min, vox.max, t0, t1)) return 1.0;
     t0 = max(t0, 0.0);
 
-    vec3 start = P - vox.min;
-    ivec3 cell  = ivec3(floor(start));
-    ivec3 step  = ivec3(sign(L));
-    vec3  ro    = start;
-    vec3  next  = vec3(cell) + max(step, ivec3(0));
-    vec3  tMax  = (next - ro) / L;
-    vec3  tDelta= abs(1.0 / L);
+    const float EPS = 1e-4; // tiny epsilon to avoid boundary ambiguity
+    vec3 start = P + L * max(t0, EPS) - vox.min;
+
+    ivec3 step = ivec3(sign(L));
+    ivec3 cell = ivec3(floor(start));
+    vec3  ro   = start;
+    vec3  next = vec3(cell) + max(step, ivec3(0));
+    vec3  tMax   = (next - ro) / L;
+    vec3  tDelta = abs(1.0 / L);
+
+    // advance into the next cell before testing occupancy
+    if (tMax.x < tMax.y) {
+        if (tMax.x < tMax.z) { cell.x += step.x; tMax.x += tDelta.x; }
+        else                  { cell.z += step.z; tMax.z += tDelta.z; }
+    } else {
+        if (tMax.y < tMax.z) { cell.y += step.y; tMax.y += tDelta.y; }
+        else                  { cell.z += step.z; tMax.z += tDelta.z; }
+    }
 
     const int MAX = 4096;
     for (int i=0; i<MAX; ++i) {
         if (any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, vox.dim))) return 1.0;
-        if (texelFetch(uOccTex, cell, 0).r != 0u) return 0.0; // occluder found
+        if (texelFetch(uOccTex, cell, 0).r != 0u) return 0.0;
 
         if (tMax.x < tMax.y) {
             if (tMax.x < tMax.z) { cell.x += step.x; tMax.x += tDelta.x; }
-            else                 { cell.z += step.z; tMax.z += tDelta.z; }
+            else                  { cell.z += step.z; tMax.z += tDelta.z; }
         } else {
             if (tMax.y < tMax.z) { cell.y += step.y; tMax.y += tDelta.y; }
-            else                 { cell.z += step.z; tMax.z += tDelta.z; }
+            else                  { cell.z += step.z; tMax.z += tDelta.z; }
         }
     }
-    return 1.0; // conservative: treat runaway as lit
+    return 1.0;
 }
 
 void main() {
@@ -102,15 +113,11 @@ void main() {
     // point→light direction
     vec3 L = normalize(-sunDir);
 
-    // Leave the hit voxel, then move into the next voxel along L
-    const float VOX = 1.0;
-    vec3 Pstart = P + N * (0.501 * VOX) + L * (0.501 * VOX);
-
     // lambert first (independent of visibility)
     float ndl = max(dot(N, L), 0.0);
 
-    // L0-only visibility from the already outside point
-    float vis = shadowVisibilityL0_fromOutside(Pstart, L);
+    // robust L0 visibility test
+    float vis = shadowVisibilityL0_advanceFirst(P, L);
 
     vec3 color = albedo * ndl * vis;
 
