@@ -5,6 +5,18 @@
 
 namespace engine {
 
+// Owns resources required for one-off transfer operations.
+class TransferContext {
+public:
+  TransferContext(VkDevice device, uint32_t queue_family);
+  ~TransferContext();
+
+  VkDevice device = VK_NULL_HANDLE;
+  VkCommandPool pool = VK_NULL_HANDLE;
+  VkCommandBuffer cmd = VK_NULL_HANDLE;
+  VkFence fence = VK_NULL_HANDLE;
+};
+
 // Simple RAII wrapper for VMA
 class GpuAllocator {
 public:
@@ -33,11 +45,9 @@ Buffer create_buffer(VmaAllocator alloc, VkDeviceSize size,
 Buffer create_host_buffer(VmaAllocator alloc, VkDeviceSize size,
                           VkBufferUsageFlags usage);
 void destroy_buffer(VmaAllocator alloc, Buffer &buf);
-// Upload using a dedicated transfer command buffer on 'queue_family' using
-// 'queue'.
-void upload_buffer(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
-                   VkQueue queue, const Buffer &dst, const void *data,
-                   size_t bytes);
+// Upload using the provided transfer context on 'queue'.
+void upload_buffer(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
+                   const Buffer &dst, const void *data, size_t bytes);
 
 // -------- Images --------
 struct Image2D {
@@ -52,11 +62,10 @@ Image2D create_image2d(VmaAllocator alloc, uint32_t w, uint32_t h,
 
 void destroy_image2d(VmaAllocator alloc, Image2D &img);
 
-// Upload using a dedicated transfer command buffer on 'queue_family' using
-// 'queue'. Transitions: UNDEFINED -> TRANSFER_DST, copy, TRANSFER_DST ->
-// SHADER_READ_ONLY.
-void upload_image2d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
-                    VkQueue queue, const void *src_rgba8, size_t src_bytes,
+// Upload using the provided transfer context on 'queue'. Transitions:
+// UNDEFINED -> TRANSFER_DST, copy, TRANSFER_DST -> SHADER_READ_ONLY.
+void upload_image2d(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
+                    const void *src_rgba8, size_t src_bytes,
                     const Image2D &dst);
 
 struct Image3D {
@@ -68,11 +77,7 @@ struct Image3D {
 Image3D create_image3d(VmaAllocator alloc, uint32_t w, uint32_t h, uint32_t d,
                        VkFormat format, VkImageUsageFlags usage);
 void destroy_image3d(VmaAllocator alloc, Image3D &img);
-void upload_image3d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
-                    VkQueue queue, const void *src, size_t src_bytes,
-                    const Image3D &dst);
-
-// Destroy the internal transfer context used by upload helpers.
-void destroy_transfer_context();
+void upload_image3d(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
+                    const void *src, size_t src_bytes, const Image3D &dst);
 
 } // namespace engine

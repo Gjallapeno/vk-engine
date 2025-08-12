@@ -11,40 +11,33 @@
 
 namespace engine {
 
-namespace {
-
-struct TransferContext {
-  VkDevice device = VK_NULL_HANDLE;
-  VkCommandPool pool = VK_NULL_HANDLE;
-  VkCommandBuffer cmd = VK_NULL_HANDLE;
-  VkFence fence = VK_NULL_HANDLE;
-};
-
-TransferContext g_transfer;
-
-void ensure_transfer(VkDevice device, uint32_t queue_family) {
-  if (g_transfer.pool)
-    return;
-
-  g_transfer.device = device;
+TransferContext::TransferContext(VkDevice dev, uint32_t queue_family) {
+  device = dev;
 
   VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
   pci.queueFamilyIndex = queue_family;
   pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-  VK_CHECK(vkCreateCommandPool(device, &pci, nullptr, &g_transfer.pool));
+  VK_CHECK(vkCreateCommandPool(device, &pci, nullptr, &pool));
 
   VkCommandBufferAllocateInfo ai{
       VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-  ai.commandPool = g_transfer.pool;
+  ai.commandPool = pool;
   ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
   ai.commandBufferCount = 1;
-  VK_CHECK(vkAllocateCommandBuffers(device, &ai, &g_transfer.cmd));
+  VK_CHECK(vkAllocateCommandBuffers(device, &ai, &cmd));
 
   VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-  VK_CHECK(vkCreateFence(device, &fi, nullptr, &g_transfer.fence));
+  VK_CHECK(vkCreateFence(device, &fi, nullptr, &fence));
 }
 
-} // namespace
+TransferContext::~TransferContext() {
+  if (cmd)
+    vkFreeCommandBuffers(device, pool, 1, &cmd);
+  if (pool)
+    vkDestroyCommandPool(device, pool, nullptr);
+  if (fence)
+    vkDestroyFence(device, fence, nullptr);
+}
 
 // ---------- allocator ----------
 void GpuAllocator::init(VkInstance instance, VkPhysicalDevice physical,
@@ -103,7 +96,8 @@ Buffer create_host_buffer(VmaAllocator alloc, VkDeviceSize size,
   aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
               VMA_ALLOCATION_CREATE_MAPPED_BIT;
 
-  VK_CHECK(vmaCreateBuffer(alloc, &bi, &aci, &b.buffer, &b.allocation, nullptr));
+  VK_CHECK(
+      vmaCreateBuffer(alloc, &bi, &aci, &b.buffer, &b.allocation, nullptr));
   return b;
 }
 
@@ -114,9 +108,8 @@ void destroy_buffer(VmaAllocator alloc, Buffer &buf) {
   }
 }
 
-void upload_buffer(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
-                   VkQueue queue, const Buffer &dst, const void *data,
-                   size_t bytes) {
+void upload_buffer(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
+                   const Buffer &dst, const void *data, size_t bytes) {
   // staging buffer
   VkBuffer stagingBuf = VK_NULL_HANDLE;
   VmaAllocation stagingAlloc = nullptr;
@@ -137,25 +130,24 @@ void upload_buffer(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
   }
 
   // command buffer
-  ensure_transfer(device, queue_family);
-  VK_CHECK(vkResetCommandPool(device, g_transfer.pool, 0));
+  VK_CHECK(vkResetCommandPool(ctx.device, ctx.pool, 0));
 
   VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  VK_CHECK(vkBeginCommandBuffer(g_transfer.cmd, &bi));
+  VK_CHECK(vkBeginCommandBuffer(ctx.cmd, &bi));
 
   VkBufferCopy region{};
   region.size = bytes;
-  vkCmdCopyBuffer(g_transfer.cmd, stagingBuf, dst.buffer, 1, &region);
+  vkCmdCopyBuffer(ctx.cmd, stagingBuf, dst.buffer, 1, &region);
 
-  VK_CHECK(vkEndCommandBuffer(g_transfer.cmd));
+  VK_CHECK(vkEndCommandBuffer(ctx.cmd));
 
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1;
-  si.pCommandBuffers = &g_transfer.cmd;
-  VK_CHECK(vkResetFences(device, 1, &g_transfer.fence));
-  VK_CHECK(vkQueueSubmit(queue, 1, &si, g_transfer.fence));
-  VK_CHECK(vkWaitForFences(device, 1, &g_transfer.fence, VK_TRUE, UINT64_MAX));
+  si.pCommandBuffers = &ctx.cmd;
+  VK_CHECK(vkResetFences(ctx.device, 1, &ctx.fence));
+  VK_CHECK(vkQueueSubmit(queue, 1, &si, ctx.fence));
+  VK_CHECK(vkWaitForFences(ctx.device, 1, &ctx.fence, VK_TRUE, UINT64_MAX));
 
   vmaDestroyBuffer(alloc, stagingBuf, stagingAlloc);
 }
@@ -210,8 +202,8 @@ void destroy_image2d(VmaAllocator alloc, Image2D &img) {
   }
 }
 
-void upload_image2d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
-                    VkQueue queue, const void *src_rgba8, size_t src_bytes,
+void upload_image2d(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
+                    const void *src_rgba8, size_t src_bytes,
                     const Image2D &dst) {
   // staging
   VkBuffer stagingBuf = VK_NULL_HANDLE;
@@ -233,12 +225,11 @@ void upload_image2d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
   }
 
   // command buffer
-  ensure_transfer(device, queue_family);
-  VK_CHECK(vkResetCommandPool(device, g_transfer.pool, 0));
+  VK_CHECK(vkResetCommandPool(ctx.device, ctx.pool, 0));
 
   VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  VK_CHECK(vkBeginCommandBuffer(g_transfer.cmd, &bi));
+  VK_CHECK(vkBeginCommandBuffer(ctx.cmd, &bi));
 
   // layout transitions + copy
   VkImageMemoryBarrier to_dst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -251,7 +242,7 @@ void upload_image2d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
   to_dst.image = dst.image;
   to_dst.subresourceRange = full_color(dst.mip_levels);
 
-  vkCmdPipelineBarrier(g_transfer.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+  vkCmdPipelineBarrier(ctx.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
                        nullptr, 1, &to_dst);
 
@@ -260,7 +251,7 @@ void upload_image2d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
   region.imageSubresource.mipLevel = 0;
   region.imageSubresource.layerCount = 1;
   region.imageExtent = {dst.width, dst.height, 1};
-  vkCmdCopyBufferToImage(g_transfer.cmd, stagingBuf, dst.image,
+  vkCmdCopyBufferToImage(ctx.cmd, stagingBuf, dst.image,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
   uint32_t mip_w = dst.width;
@@ -279,7 +270,7 @@ void upload_image2d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
     barrier.subresourceRange.levelCount = 1;
     barrier.subresourceRange.baseArrayLayer = 0;
     barrier.subresourceRange.layerCount = 1;
-    vkCmdPipelineBarrier(g_transfer.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    vkCmdPipelineBarrier(ctx.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
                          nullptr, 1, &barrier);
 
@@ -289,7 +280,8 @@ void upload_image2d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
     blit.srcSubresource.baseArrayLayer = 0;
     blit.srcSubresource.layerCount = 1;
     blit.srcOffsets[0] = {0, 0, 0};
-    blit.srcOffsets[1] = {static_cast<int32_t>(mip_w), static_cast<int32_t>(mip_h), 1};
+    blit.srcOffsets[1] = {static_cast<int32_t>(mip_w),
+                          static_cast<int32_t>(mip_h), 1};
     mip_w = mip_w > 1 ? mip_w / 2 : 1;
     mip_h = mip_h > 1 ? mip_h / 2 : 1;
     blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -297,8 +289,9 @@ void upload_image2d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
     blit.dstSubresource.baseArrayLayer = 0;
     blit.dstSubresource.layerCount = 1;
     blit.dstOffsets[0] = {0, 0, 0};
-    blit.dstOffsets[1] = {static_cast<int32_t>(mip_w), static_cast<int32_t>(mip_h), 1};
-    vkCmdBlitImage(g_transfer.cmd, dst.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+    blit.dstOffsets[1] = {static_cast<int32_t>(mip_w),
+                          static_cast<int32_t>(mip_h), 1};
+    vkCmdBlitImage(ctx.cmd, dst.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    dst.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
                    VK_FILTER_LINEAR);
 
@@ -306,7 +299,7 @@ void upload_image2d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    vkCmdPipelineBarrier(g_transfer.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    vkCmdPipelineBarrier(ctx.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr,
                          0, nullptr, 1, &barrier);
   }
@@ -324,38 +317,28 @@ void upload_image2d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
   last.subresourceRange.levelCount = 1;
   last.subresourceRange.baseArrayLayer = 0;
   last.subresourceRange.layerCount = 1;
-  vkCmdPipelineBarrier(g_transfer.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+  vkCmdPipelineBarrier(ctx.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
                        nullptr, 1, &last);
 
-  VK_CHECK(vkEndCommandBuffer(g_transfer.cmd));
+  VK_CHECK(vkEndCommandBuffer(ctx.cmd));
 
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1;
-  si.pCommandBuffers = &g_transfer.cmd;
-  VK_CHECK(vkResetFences(device, 1, &g_transfer.fence));
-  VK_CHECK(vkQueueSubmit(queue, 1, &si, g_transfer.fence));
-    VK_CHECK(vkWaitForFences(device, 1, &g_transfer.fence, VK_TRUE, UINT64_MAX));
+  si.pCommandBuffers = &ctx.cmd;
+  VK_CHECK(vkResetFences(ctx.device, 1, &ctx.fence));
+  VK_CHECK(vkQueueSubmit(queue, 1, &si, ctx.fence));
+  VK_CHECK(vkWaitForFences(ctx.device, 1, &ctx.fence, VK_TRUE, UINT64_MAX));
 
-    vmaDestroyBuffer(alloc, stagingBuf, stagingAlloc);
-  }
-
-void destroy_transfer_context() {
-  if (!g_transfer.pool && !g_transfer.fence)
-    return;
-  if (g_transfer.cmd)
-    vkFreeCommandBuffers(g_transfer.device, g_transfer.pool, 1, &g_transfer.cmd);
-  if (g_transfer.pool)
-    vkDestroyCommandPool(g_transfer.device, g_transfer.pool, nullptr);
-  if (g_transfer.fence)
-    vkDestroyFence(g_transfer.device, g_transfer.fence, nullptr);
-  g_transfer = {};
+  vmaDestroyBuffer(alloc, stagingBuf, stagingAlloc);
 }
 
 Image3D create_image3d(VmaAllocator alloc, uint32_t w, uint32_t h, uint32_t d,
                        VkFormat format, VkImageUsageFlags usage) {
   Image3D img{};
-  img.width = w; img.height = h; img.depth = d;
+  img.width = w;
+  img.height = h;
+  img.depth = d;
   VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   ci.imageType = VK_IMAGE_TYPE_3D;
   ci.format = format;
@@ -369,7 +352,8 @@ Image3D create_image3d(VmaAllocator alloc, uint32_t w, uint32_t h, uint32_t d,
   ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   VmaAllocationCreateInfo aci{};
   aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-  VK_CHECK(vmaCreateImage(alloc, &ci, &aci, &img.image, &img.allocation, nullptr));
+  VK_CHECK(
+      vmaCreateImage(alloc, &ci, &aci, &img.image, &img.allocation, nullptr));
   return img;
 }
 
@@ -380,26 +364,29 @@ void destroy_image3d(VmaAllocator alloc, Image3D &img) {
   }
 }
 
-void upload_image3d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
-                    VkQueue queue, const void *src, size_t src_bytes,
-                    const Image3D &dst) {
-  VkBuffer stagingBuf = VK_NULL_HANDLE; VmaAllocation stagingAlloc = nullptr; {
+void upload_image3d(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
+                    const void *src, size_t src_bytes, const Image3D &dst) {
+  VkBuffer stagingBuf = VK_NULL_HANDLE;
+  VmaAllocation stagingAlloc = nullptr;
+  {
     VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bi.size = src_bytes; bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    VmaAllocationCreateInfo aci{}; aci.usage = VMA_MEMORY_USAGE_AUTO;
+    bi.size = src_bytes;
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO;
     aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
                 VMA_ALLOCATION_CREATE_MAPPED_BIT;
     VmaAllocationInfo info{};
-    VK_CHECK(vmaCreateBuffer(alloc, &bi, &aci, &stagingBuf, &stagingAlloc, &info));
+    VK_CHECK(
+        vmaCreateBuffer(alloc, &bi, &aci, &stagingBuf, &stagingAlloc, &info));
     std::memcpy(info.pMappedData, src, src_bytes);
   }
 
-  ensure_transfer(device, queue_family);
-  VK_CHECK(vkResetCommandPool(device, g_transfer.pool, 0));
+  VK_CHECK(vkResetCommandPool(ctx.device, ctx.pool, 0));
 
   VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  VK_CHECK(vkBeginCommandBuffer(g_transfer.cmd, &bi));
+  VK_CHECK(vkBeginCommandBuffer(ctx.cmd, &bi));
 
   VkImageMemoryBarrier to_dst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
   to_dst.srcAccessMask = 0;
@@ -412,7 +399,7 @@ void upload_image3d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
   to_dst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
   to_dst.subresourceRange.levelCount = 1;
   to_dst.subresourceRange.layerCount = 1;
-  vkCmdPipelineBarrier(g_transfer.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+  vkCmdPipelineBarrier(ctx.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
                        nullptr, 1, &to_dst);
 
@@ -422,7 +409,7 @@ void upload_image3d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
   region.imageSubresource.baseArrayLayer = 0;
   region.imageSubresource.layerCount = 1;
   region.imageExtent = {dst.width, dst.height, dst.depth};
-  vkCmdCopyBufferToImage(g_transfer.cmd, stagingBuf, dst.image,
+  vkCmdCopyBufferToImage(ctx.cmd, stagingBuf, dst.image,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
   VkImageMemoryBarrier to_read{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -436,17 +423,18 @@ void upload_image3d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
   to_read.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
   to_read.subresourceRange.levelCount = 1;
   to_read.subresourceRange.layerCount = 1;
-  vkCmdPipelineBarrier(g_transfer.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+  vkCmdPipelineBarrier(ctx.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
                        nullptr, 1, &to_read);
 
-  VK_CHECK(vkEndCommandBuffer(g_transfer.cmd));
+  VK_CHECK(vkEndCommandBuffer(ctx.cmd));
 
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-  si.commandBufferCount = 1; si.pCommandBuffers = &g_transfer.cmd;
-  VK_CHECK(vkResetFences(device, 1, &g_transfer.fence));
-  VK_CHECK(vkQueueSubmit(queue, 1, &si, g_transfer.fence));
-  VK_CHECK(vkWaitForFences(device, 1, &g_transfer.fence, VK_TRUE, UINT64_MAX));
+  si.commandBufferCount = 1;
+  si.pCommandBuffers = &ctx.cmd;
+  VK_CHECK(vkResetFences(ctx.device, 1, &ctx.fence));
+  VK_CHECK(vkQueueSubmit(queue, 1, &si, ctx.fence));
+  VK_CHECK(vkWaitForFences(ctx.device, 1, &ctx.fence, VK_TRUE, UINT64_MAX));
 
   vmaDestroyBuffer(alloc, stagingBuf, stagingAlloc);
 }
