@@ -52,26 +52,24 @@ bool aabbHit(vec3 ro, vec3 rd, vec3 vmin, vec3 vmax, out float t0, out float t1)
     return t1 > max(t0, 0.0);
 }
 
-// L0-only hard shadow visibility
-float shadowVisibilityL0(vec3 P, vec3 L) {
+// Assumes P is already outside the surface (caller applied offsets)
+float shadowVisibilityL0_fromOutside(vec3 P, vec3 L) {
     float t0, t1;
-    if (!aabbHit(P, L, vox.min, vox.max, t0, t1)) return 1.0;
+    if (!aabbHit(P, L, vox.min, vox.max, t0, t1)) return 1.0; // leaves volume → lit
     t0 = max(t0, 0.0);
 
-    vec3 cellSize = (vox.max - vox.min) / vec3(vox.dim);
-    vec3 rdir = L / cellSize;
-    vec3 start = (P - vox.min) / cellSize + rdir * 0.501;
+    vec3 start = P - vox.min;
+    ivec3 cell  = ivec3(floor(start));
+    ivec3 step  = ivec3(sign(L));
+    vec3  ro    = start;
+    vec3  next  = vec3(cell) + max(step, ivec3(0));
+    vec3  tMax  = (next - ro) / L;
+    vec3  tDelta= abs(1.0 / L);
 
-    ivec3 cell = ivec3(floor(start));
-    ivec3 step = ivec3(sign(rdir));
-    vec3 ro = start;
-    vec3 next = vec3(cell) + max(step, ivec3(0));
-    vec3 tMax = (next - ro) / rdir;
-    vec3 tDelta = abs(1.0 / rdir);
-
-    for (int i = 0; i < 4096; ++i) {
+    const int MAX = 4096;
+    for (int i=0; i<MAX; ++i) {
         if (any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, vox.dim))) return 1.0;
-        if (texelFetch(uOccTex, cell, 0).r != 0u) return 0.0;
+        if (texelFetch(uOccTex, cell, 0).r != 0u) return 0.0; // occluder found
 
         if (tMax.x < tMax.y) {
             if (tMax.x < tMax.z) { cell.x += step.x; tMax.x += tDelta.x; }
@@ -81,7 +79,7 @@ float shadowVisibilityL0(vec3 P, vec3 L) {
             else                 { cell.z += step.z; tMax.z += tDelta.z; }
         }
     }
-    return 1.0; // fail-safe
+    return 1.0; // conservative: treat runaway as lit
 }
 
 void main() {
@@ -91,7 +89,7 @@ void main() {
         outColor = vec4(albedo, 1.0);
         return;
     }
-    vec3 normal = texture(gNormal, uv).xyz;
+    vec3 N = normalize(texture(gNormal, uv).xyz);
     float depth = texture(gDepth, uv).r;
     if (depth == 0.0) {
         outColor = vec4(albedo, 1.0);
@@ -99,21 +97,25 @@ void main() {
     }
     vec2 rp = gl_FragCoord.xy / cam.outputResolution * cam.renderResolution;
     Ray viewRay = makeRay(rp);
-    vec3 pos = viewRay.o + viewRay.d * depth;
+    vec3 P = viewRay.o + viewRay.d * depth;
 
     // point→light direction
     vec3 L = normalize(-sunDir);
 
-    // lambert first (independent of visibility)
-    float ndl = max(dot(normal, L), 0.0);
+    // Leave the hit voxel, then move into the next voxel along L
+    const float VOX = 1.0;
+    vec3 Pstart = P + N * (0.501 * VOX) + L * (0.501 * VOX);
 
-    // visibility via L0-only DDA
-    float vis = shadowVisibilityL0(pos, L);
+    // lambert first (independent of visibility)
+    float ndl = max(dot(N, L), 0.0);
+
+    // L0-only visibility from the already outside point
+    float vis = shadowVisibilityL0_fromOutside(Pstart, L);
 
     vec3 color = albedo * ndl * vis;
 
     // Debug: show ndl and normal quickly
-    if (cam.debugNormals > 0.5) color = normal * 0.5 + 0.5;
+    if (cam.debugNormals > 0.5) color = N * 0.5 + 0.5;
     if (cam.debugSteps   > 0.5) color = vec3(ndl);
 
     outColor = vec4(color, 1.0);
