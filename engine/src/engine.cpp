@@ -64,12 +64,12 @@ static void record_textured(VkCommandBuffer cmd, VkImage, VkImageView view,
 
   vkCmdBeginRendering(cmd, &ri);
 
-  // STANDARD viewport (positive height; no winding flip)
+  // Flipped viewport (negative height to keep winding consistent)
   VkViewport vp{};
   vp.x = 0.0f;
-  vp.y = 0.0f;
+  vp.y = extent.height;
   vp.width  = static_cast<float>(extent.width);
-  vp.height = static_cast<float>(extent.height);
+  vp.height = -float(extent.height);
   vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
   vkCmdSetViewport(cmd, 0, 1, &vp);
 
