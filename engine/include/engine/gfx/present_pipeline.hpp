@@ -16,7 +16,9 @@ struct PresentPipelineCreateInfo {
 // Descriptor set layout:
 //   set0,binding0 uniform buffer    (CameraUBO)
 //   set0,binding1 uniform buffer    (VoxelAABB)
-//   set0,binding2 combined sampler  (3D occupancy texture)
+//   set0,binding2 combined sampler  (L0 occupancy texture)
+//   set0,binding3 combined sampler  (material texture)
+//   set0,binding4 combined sampler  (L1 occupancy texture)
 class PresentPipeline {
 public:
   explicit PresentPipeline(const PresentPipelineCreateInfo& ci);

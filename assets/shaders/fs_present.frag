@@ -16,6 +16,7 @@ layout(set=0, binding=1, std140) uniform VoxelAABB {
 
 layout(set=0, binding=2) uniform usampler3D uOccTex;
 layout(set=0, binding=3) uniform usampler3D uMatTex;
+layout(set=0, binding=4) uniform usampler3D uOccTexL1;
 
 struct Ray { vec3 o; vec3 d; };
 
@@ -28,7 +29,8 @@ Ray makeRay(vec2 p) {
     return Ray(ro, rd);
 }
 
-bool gridRaycast(Ray r, out ivec3 cell, out int hitFace) {
+// Fine DDA on the full-resolution voxel grid
+bool gridRaycastL0(Ray r, out ivec3 cell, out int hitFace) {
     vec3 invD = 1.0 / r.d;
     vec3 t0s = (vox.min - r.o) * invD;
     vec3 t1s = (vox.max - r.o) * invD;
@@ -65,6 +67,51 @@ bool gridRaycast(Ray r, out ivec3 cell, out int hitFace) {
                 cell.z += step.z; tMax.z += tDelta.z; hitFace = step.z > 0 ? 4 : 5;
             }
         }
+    }
+    return false;
+}
+
+// Traverse coarse L1 occupancy first, then descend to L0 if needed
+bool gridRaycast(Ray r, out ivec3 cell, out int hitFace) {
+    vec3 invD = 1.0 / r.d;
+    vec3 t0s = (vox.min - r.o) * invD;
+    vec3 t1s = (vox.max - r.o) * invD;
+    vec3 tsm = min(t0s, t1s);
+    vec3 tsM = max(t0s, t1s);
+    float t0 = max(max(tsm.x, tsm.y), tsm.z);
+    float t1 = min(min(tsM.x, tsM.y), tsM.z);
+    if (t1 <= max(t0, 0.0)) return false;
+    float t = max(t0, 0.0);
+    vec3 pos = r.o + t * r.d;
+
+    ivec3 dim1 = textureSize(uOccTexL1, 0);
+    vec3 cellSize = (vox.max - vox.min) / vec3(dim1);
+    vec3 rel = (pos - vox.min) / (vox.max - vox.min);
+    ivec3 cell1 = ivec3(clamp(floor(rel * vec3(dim1)), vec3(0.0), vec3(dim1) - vec3(1.0)));
+    ivec3 step = ivec3(greaterThan(r.d, vec3(0.0))) * 2 - ivec3(1);
+    vec3 next = vox.min + (vec3(cell1) + (vec3(step) + 1.0) * 0.5) * cellSize;
+    vec3 tMax = (next - pos) / r.d;
+    vec3 tDelta = cellSize / abs(r.d);
+    for(int i=0;i<1024;i++){
+        if(any(lessThan(cell1, ivec3(0))) || any(greaterThanEqual(cell1, dim1))) break;
+        if(texelFetch(uOccTexL1, cell1, 0).r > 0u){
+            Ray r2; r2.o = pos; r2.d = r.d;
+            return gridRaycastL0(r2, cell, hitFace);
+        }
+        if(tMax.x < tMax.y){
+            if(tMax.x < tMax.z){
+                cell1.x += step.x; t = tMax.x; tMax.x += tDelta.x;
+            }else{
+                cell1.z += step.z; t = tMax.z; tMax.z += tDelta.z;
+            }
+        }else{
+            if(tMax.y < tMax.z){
+                cell1.y += step.y; t = tMax.y; tMax.y += tDelta.y;
+            }else{
+                cell1.z += step.z; t = tMax.z; tMax.z += tDelta.z;
+            }
+        }
+        pos = r.o + t * r.d;
     }
     return false;
 }

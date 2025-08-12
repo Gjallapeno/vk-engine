@@ -1,0 +1,23 @@
+#version 460
+layout(local_size_x=8, local_size_y=8, local_size_z=8) in;
+
+layout(binding=0) uniform usampler3D occL0;
+layout(r8ui, binding=1) uniform uimage3D occL1;
+
+void main(){
+    ivec3 id = ivec3(gl_GlobalInvocationID);
+    ivec3 dim0 = textureSize(occL0, 0);
+    ivec3 dim1 = dim0 / 4;
+    if(any(greaterThanEqual(id, dim1))) return;
+    ivec3 base = id * 4;
+    uint occ = 0u;
+    for(int z=0; z<4 && occ==0; ++z){
+        for(int y=0; y<4 && occ==0; ++y){
+            for(int x=0; x<4; ++x){
+                ivec3 p = base + ivec3(x,y,z);
+                if(texelFetch(occL0, p, 0).r > 0u){ occ = 1u; break; }
+            }
+        }
+    }
+    imageStore(occL1, id, uvec4(occ,0,0,0));
+}
