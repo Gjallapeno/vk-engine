@@ -17,6 +17,7 @@
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 #include <spdlog/spdlog.h>
 #include <thread>
@@ -46,6 +47,18 @@ static std::filesystem::path exe_dir() {
 }
 
 static constexpr uint32_t kStepsDown = 4;
+static constexpr float    kRenderScale = 0.66f;
+
+static float halton(uint32_t i, uint32_t b) {
+  float f = 1.0f;
+  float r = 0.0f;
+  while (i > 0) {
+    f /= static_cast<float>(b);
+    r += f * static_cast<float>(i % b);
+    i /= b;
+  }
+  return r;
+}
 
 struct DrawCtx {
   RayPipeline*      ray_pipe = nullptr;
@@ -71,6 +84,7 @@ struct DrawCtx {
   VkImageView       steps_view  = VK_NULL_HANDLE;
   VkBuffer          steps_buffer = VK_NULL_HANDLE;
   VkExtent2D        steps_dim{0,0};
+  VkExtent2D        ray_extent{0,0};
   VkExtent3D        occ_dim{0,0,0};
   VkExtent3D        dispatch_dim{0,0,0};
   VkExtent3D        occ_l1_dim{0,0,0};
@@ -80,12 +94,13 @@ struct DrawCtx {
 
 struct CameraUBO {
   glm::mat4 inv_view_proj{1.0f};
-  glm::vec2 resolution{0.0f};
+  glm::vec2 render_resolution{0.0f};
+  glm::vec2 output_resolution{0.0f};
   float     time = 0.0f;
   float     debug_normals = 0.0f;
   float     debug_level = 0.0f;
   float     debug_steps = 0.0f;
-  glm::vec2 pad{0.0f};
+  glm::vec4 pad{0.0f};
 };
 
 struct VoxelAABB {
@@ -235,7 +250,7 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
 
   VkRenderingInfo gi{ VK_STRUCTURE_TYPE_RENDERING_INFO };
   gi.renderArea.offset = {0,0};
-  gi.renderArea.extent = extent;
+  gi.renderArea.extent = ctx->ray_extent;
   gi.layerCount = 1;
   gi.colorAttachmentCount = 3;
   gi.pColorAttachments = gAtt;
@@ -244,12 +259,12 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
 
   VkViewport vp{};
   vp.x = 0.0f;
-  vp.y = static_cast<float>(extent.height);
-  vp.width  = static_cast<float>(extent.width);
-  vp.height = -static_cast<float>(extent.height);
+  vp.y = static_cast<float>(ctx->ray_extent.height);
+  vp.width  = static_cast<float>(ctx->ray_extent.width);
+  vp.height = -static_cast<float>(ctx->ray_extent.height);
   vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
   vkCmdSetViewport(cmd, 0, 1, &vp);
-  VkRect2D sc{ {0,0}, extent }; vkCmdSetScissor(cmd, 0, 1, &sc);
+  VkRect2D sc{ {0,0}, ctx->ray_extent }; vkCmdSetScissor(cmd, 0, 1, &sc);
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->ray_pipe->pipeline());
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->ray_pipe->layout(),
                           0, 1, &ctx->ray_dset, 0, nullptr);
@@ -656,8 +671,11 @@ int run() {
     ai.descriptorSetCount = 1; ai.pSetLayouts = &layout;
     VK_CHECK(vkAllocateDescriptorSets(device.device(), &ai, &ray_dset));
 
-    uint32_t steps_w = (sw + kStepsDown - 1) / kStepsDown;
-    uint32_t steps_h = (sh + kStepsDown - 1) / kStepsDown;
+    uint32_t rw = static_cast<uint32_t>(static_cast<float>(sw) * kRenderScale);
+    uint32_t rh = static_cast<uint32_t>(static_cast<float>(sh) * kRenderScale);
+    rw = std::max(1u, rw); rh = std::max(1u, rh);
+    uint32_t steps_w = (rw + kStepsDown - 1) / kStepsDown;
+    uint32_t steps_h = (rh + kStepsDown - 1) / kStepsDown;
     steps_img = create_image2d(allocator.raw(), steps_w, steps_h, VK_FORMAT_R32_UINT,
                                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     VkImageViewCreateInfo svi{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
@@ -686,11 +704,11 @@ int run() {
     rwrites[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; rwrites[5].dstSet = ray_dset; rwrites[5].dstBinding = 5; rwrites[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; rwrites[5].descriptorCount = 1; rwrites[5].pImageInfo = &steps_info;
     vkUpdateDescriptorSets(device.device(), 6, rwrites, 0, nullptr);
 
-    g_albedo_img = create_image2d(allocator.raw(), sw, sh, VK_FORMAT_R8G8B8A8_UNORM,
+    g_albedo_img = create_image2d(allocator.raw(), rw, rh, VK_FORMAT_R8G8B8A8_UNORM,
                                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    g_normal_img = create_image2d(allocator.raw(), sw, sh, VK_FORMAT_R16G16B16A16_SFLOAT,
+    g_normal_img = create_image2d(allocator.raw(), rw, rh, VK_FORMAT_R16G16B16A16_SFLOAT,
                                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    g_depth_img = create_image2d(allocator.raw(), sw, sh, VK_FORMAT_R32_SFLOAT,
+    g_depth_img = create_image2d(allocator.raw(), rw, rh, VK_FORMAT_R32_SFLOAT,
                                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
 
     VkImageViewCreateInfo iv{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
@@ -719,6 +737,7 @@ int run() {
     ctx.g_albedo = g_albedo_img.image; ctx.g_normal = g_normal_img.image; ctx.g_depth = g_depth_img.image;
     ctx.g_albedo_view = g_albedo_view; ctx.g_normal_view = g_normal_view; ctx.g_depth_view = g_depth_view;
     ctx.steps_image = steps_img.image; ctx.steps_view = steps_view; ctx.steps_buffer = steps_buf.buffer; ctx.steps_dim = {steps_w, steps_h};
+    ctx.ray_extent = {rw, rh};
     ctx.first_frame = true;
   };
 
@@ -734,6 +753,7 @@ int run() {
   VkExtent2D last = swapchain->extent();
   float total_time = 0.0f;
   int   frame_counter = 0;
+  uint32_t jitter_index = 0;
   using namespace std::chrono_literals;
 
   enum { MODE_CLEAR=0, MODE_FILL_BOX=1, MODE_FILL_SPHERE=2, MODE_NOISE=3, MODE_TERRAIN=4 };
@@ -828,14 +848,23 @@ int run() {
       std::this_thread::sleep_for(1ms);
       continue;
     }
-    glm::mat4 view_proj = cam.view_projection(
-        static_cast<float>(want.width) / static_cast<float>(want.height),
-        0.1f, 100.0f);
+
+    float rwf = static_cast<float>(swapchain->extent().width) * kRenderScale;
+    float rhf = static_cast<float>(swapchain->extent().height) * kRenderScale;
+    float jx = halton(jitter_index & 1023u, 2) - 0.5f;
+    float jy = halton(jitter_index & 1023u, 3) - 0.5f;
+    jitter_index++;
+    glm::mat4 view = glm::lookAt(cam.position, cam.position + cam.forward(), {0.0f,1.0f,0.0f});
+    glm::mat4 proj = glm::perspective(glm::radians(90.0f), rwf / rhf, 0.1f, 100.0f);
+    proj[2][0] += jx * 2.0f / rwf;
+    proj[2][1] += jy * 2.0f / rhf;
+    glm::mat4 view_proj = proj * view;
 
     CameraUBO ubo{};
     ubo.inv_view_proj = glm::inverse(view_proj);
-    ubo.resolution = { static_cast<float>(swapchain->extent().width),
-                       static_cast<float>(swapchain->extent().height) };
+    ubo.render_resolution = {rwf, rhf};
+    ubo.output_resolution = { static_cast<float>(swapchain->extent().width),
+                              static_cast<float>(swapchain->extent().height) };
     ubo.time = total_time;
     ubo.debug_normals = (glfwGetKey(glfw_win, GLFW_KEY_N) == GLFW_PRESS) ? 1.0f : 0.0f;
     ubo.debug_level   = (glfwGetKey(glfw_win, GLFW_KEY_L) == GLFW_PRESS) ? 1.0f : 0.0f;
