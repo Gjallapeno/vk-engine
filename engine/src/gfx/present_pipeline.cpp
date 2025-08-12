@@ -1,23 +1,11 @@
 #include <engine/gfx/present_pipeline.hpp>
 #include <engine/vk_checks.hpp>
-#include <spdlog/spdlog.h>
-#include <fstream>
-#include <vector>
+#include <engine/gfx/utils.hpp>
 
 namespace engine {
 
-static std::vector<char> read_binary(const std::string& path) {
-  std::ifstream f(path, std::ios::ate | std::ios::binary);
-  if (!f) { spdlog::error("[vk] Failed to open SPIR-V: {}", path); std::abort(); }
-  size_t size = static_cast<size_t>(f.tellg());
-  std::vector<char> data(size);
-  f.seekg(0);
-  f.read(data.data(), size);
-  return data;
-}
-
 VkShaderModule PresentPipeline::load_module(const std::string& path) {
-  auto bytes = read_binary(path);
+  auto bytes = load_spirv_file(path);
   VkShaderModuleCreateInfo ci{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
   ci.codeSize = bytes.size();
   ci.pCode = reinterpret_cast<const uint32_t*>(bytes.data());
