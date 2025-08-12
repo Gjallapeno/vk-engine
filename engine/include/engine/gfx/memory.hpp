@@ -29,7 +29,14 @@ struct Buffer {
 
 Buffer create_buffer(VmaAllocator alloc, VkDeviceSize size, VkBufferUsageFlags usage);
 void   destroy_buffer(VmaAllocator alloc, Buffer& buf);
-void   upload_buffer(VmaAllocator alloc, const Buffer& dst, const void* data, size_t bytes);
+// One-time upload via a transient command pool on 'queue_family' using 'queue'.
+void   upload_buffer(VmaAllocator alloc,
+                     VkDevice device,
+                     uint32_t queue_family,
+                     VkQueue queue,
+                     const Buffer& dst,
+                     const void* data,
+                     size_t bytes);
 
 // -------- Images --------
 struct Image2D {

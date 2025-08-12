@@ -125,9 +125,11 @@ int run() {
   const uint16_t indices[] = { 0, 1, 2, 2, 3, 0 };
 
   Buffer vbo = create_buffer(allocator.raw(), sizeof(verts), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-  upload_buffer(allocator.raw(), vbo, verts, sizeof(verts));
+  upload_buffer(allocator.raw(), device.device(), device.graphics_family(), device.graphics_queue(),
+                vbo, verts, sizeof(verts));
   Buffer ibo = create_buffer(allocator.raw(), sizeof(indices), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-  upload_buffer(allocator.raw(), ibo, indices, sizeof(indices));
+  upload_buffer(allocator.raw(), device.device(), device.graphics_family(), device.graphics_queue(),
+                ibo, indices, sizeof(indices));
 
   // Checkerboard
   const uint32_t TEX_W = 512, TEX_H = 512;
