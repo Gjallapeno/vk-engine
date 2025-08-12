@@ -88,6 +88,25 @@ Buffer create_buffer(VmaAllocator alloc, VkDeviceSize size,
   return b;
 }
 
+Buffer create_host_buffer(VmaAllocator alloc, VkDeviceSize size,
+                          VkBufferUsageFlags usage) {
+  Buffer b{};
+  b.size = size;
+
+  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  bi.size = size;
+  bi.usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+  VmaAllocationCreateInfo aci{};
+  aci.usage = VMA_MEMORY_USAGE_AUTO;
+  aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+              VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+  VK_CHECK(vmaCreateBuffer(alloc, &bi, &aci, &b.buffer, &b.allocation, nullptr));
+  return b;
+}
+
 void destroy_buffer(VmaAllocator alloc, Buffer &buf) {
   if (buf.buffer) {
     vmaDestroyBuffer(alloc, buf.buffer, buf.allocation);
