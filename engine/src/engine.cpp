@@ -15,6 +15,7 @@
 
 #include <GLFW/glfw3.h>
 #include <algorithm>
+#include <glm/glm.hpp>
 
 #include <spdlog/spdlog.h>
 #include <thread>
@@ -70,9 +71,10 @@ struct VoxParams {
   glm::ivec3 dim{0}; int frame = 0;
   glm::vec3 volMin{0.0f}; float pad0 = 0.0f;
   glm::vec3 volMax{0.0f}; float pad1 = 0.0f;
-  glm::vec3 boxA{0.0f}; float pad2 = 0.0f;
-  glm::vec3 boxB{0.0f}; float pad3 = 0.0f;
+  glm::vec3 boxCenter{0.0f}; float pad2 = 0.0f;
+  glm::vec3 boxHalf{0.0f};   float pad3 = 0.0f;
   glm::vec3 sphereCenter{0.0f}; float sphereRadius = 0.0f;
+  int mode = 0; int op = 0; int noiseSeed = 0; int pad4 = 0;
 };
 
 static VkShaderModule load_module(VkDevice dev, const std::string& path) {
@@ -413,6 +415,19 @@ int run() {
   int   frame_counter = 0;
   using namespace std::chrono_literals;
 
+  enum { MODE_CLEAR=0, MODE_FILL_BOX=1, MODE_FILL_SPHERE=2, MODE_NOISE=3 };
+  enum { OP_REPLACE=0, OP_OR=1, OP_AND=2 };
+
+  glm::vec3 sphere_center{static_cast<float>(N)/2.0f,
+                          static_cast<float>(N)/2.0f,
+                          static_cast<float>(N)/2.0f};
+  float sphere_radius = 30.0f;
+  glm::vec3 box_center{60.0f,60.0f,60.0f};
+  glm::vec3 box_half{40.0f,40.0f,40.0f};
+  int vox_mode = MODE_FILL_SPHERE;
+  int vox_op = OP_REPLACE;
+  int noise_seed = 0;
+
   while (!window->should_close()) {
     window->poll_events();
 
@@ -444,6 +459,41 @@ int run() {
       cam.position += glm::normalize(move) * (2.0f * dt);
     }
 
+    // Voxel editing hotkeys
+    if (glfwGetKey(glfw_win, GLFW_KEY_1) == GLFW_PRESS) vox_mode = MODE_CLEAR;
+    if (glfwGetKey(glfw_win, GLFW_KEY_2) == GLFW_PRESS) vox_mode = MODE_FILL_BOX;
+    if (glfwGetKey(glfw_win, GLFW_KEY_3) == GLFW_PRESS) vox_mode = MODE_FILL_SPHERE;
+    if (glfwGetKey(glfw_win, GLFW_KEY_4) == GLFW_PRESS) vox_mode = MODE_NOISE;
+
+    if (glfwGetKey(glfw_win, GLFW_KEY_5) == GLFW_PRESS) vox_op = OP_REPLACE;
+    if (glfwGetKey(glfw_win, GLFW_KEY_6) == GLFW_PRESS) vox_op = OP_OR;
+    if (glfwGetKey(glfw_win, GLFW_KEY_7) == GLFW_PRESS) vox_op = OP_AND;
+
+    float spd = 30.0f * dt;
+    if (vox_mode == MODE_FILL_SPHERE) {
+      if (glfwGetKey(glfw_win, GLFW_KEY_LEFT) == GLFW_PRESS)  sphere_center.x -= spd;
+      if (glfwGetKey(glfw_win, GLFW_KEY_RIGHT) == GLFW_PRESS) sphere_center.x += spd;
+      if (glfwGetKey(glfw_win, GLFW_KEY_UP) == GLFW_PRESS)    sphere_center.y += spd;
+      if (glfwGetKey(glfw_win, GLFW_KEY_DOWN) == GLFW_PRESS)  sphere_center.y -= spd;
+      if (glfwGetKey(glfw_win, GLFW_KEY_PAGE_UP) == GLFW_PRESS)   sphere_center.z += spd;
+      if (glfwGetKey(glfw_win, GLFW_KEY_PAGE_DOWN) == GLFW_PRESS) sphere_center.z -= spd;
+      if (glfwGetKey(glfw_win, GLFW_KEY_EQUAL) == GLFW_PRESS)     sphere_radius += spd;
+      if (glfwGetKey(glfw_win, GLFW_KEY_MINUS) == GLFW_PRESS)     sphere_radius = std::max(1.0f, sphere_radius - spd);
+    }
+    if (vox_mode == MODE_FILL_BOX) {
+      if (glfwGetKey(glfw_win, GLFW_KEY_LEFT) == GLFW_PRESS)  box_center.x -= spd;
+      if (glfwGetKey(glfw_win, GLFW_KEY_RIGHT) == GLFW_PRESS) box_center.x += spd;
+      if (glfwGetKey(glfw_win, GLFW_KEY_UP) == GLFW_PRESS)    box_center.y += spd;
+      if (glfwGetKey(glfw_win, GLFW_KEY_DOWN) == GLFW_PRESS)  box_center.y -= spd;
+      if (glfwGetKey(glfw_win, GLFW_KEY_PAGE_UP) == GLFW_PRESS)   box_center.z += spd;
+      if (glfwGetKey(glfw_win, GLFW_KEY_PAGE_DOWN) == GLFW_PRESS) box_center.z -= spd;
+      if (glfwGetKey(glfw_win, GLFW_KEY_EQUAL) == GLFW_PRESS)     box_half += glm::vec3(spd);
+      if (glfwGetKey(glfw_win, GLFW_KEY_MINUS) == GLFW_PRESS)     box_half = glm::max(box_half - glm::vec3(spd), glm::vec3(1.0f));
+    }
+
+    if (glfwGetKey(glfw_win, GLFW_KEY_LEFT_BRACKET) == GLFW_PRESS) noise_seed--;
+    if (glfwGetKey(glfw_win, GLFW_KEY_RIGHT_BRACKET) == GLFW_PRESS) noise_seed++;
+
     auto fb = window->framebuffer_size();
     VkExtent2D want{ static_cast<uint32_t>(fb.first), static_cast<uint32_t>(fb.second) };
     if (want.width == 0 || want.height == 0) { std::this_thread::sleep_for(10ms); continue; }
@@ -474,10 +524,13 @@ int run() {
     vparams.frame = frame_counter++;
     vparams.volMin = {0.0f, 0.0f, 0.0f};
     vparams.volMax = {static_cast<float>(N), static_cast<float>(N), static_cast<float>(N)};
-    vparams.boxA = {20.0f,20.0f,20.0f};
-    vparams.boxB = {100.0f,100.0f,100.0f};
-    vparams.sphereCenter = {static_cast<float>(N)/2.0f, static_cast<float>(N)/2.0f, static_cast<float>(N)/2.0f};
-    vparams.sphereRadius = 30.0f;
+    vparams.boxCenter = box_center;
+    vparams.boxHalf   = box_half;
+    vparams.sphereCenter = sphere_center;
+    vparams.sphereRadius = sphere_radius;
+    vparams.mode = vox_mode;
+    vparams.op = vox_op;
+    vparams.noiseSeed = noise_seed;
     upload_buffer(allocator.raw(), device.device(), device.graphics_family(),
                   device.graphics_queue(), vox_params_buf, &vparams, sizeof(vparams));
 
