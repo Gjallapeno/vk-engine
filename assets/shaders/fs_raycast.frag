@@ -23,7 +23,7 @@ layout(set=0, binding=1, std140) uniform VoxelAABB {
 layout(set=0, binding=2) uniform usampler3D uOccTex;
 layout(set=0, binding=3) uniform usampler3D uMatTex;
 layout(set=0, binding=4) uniform usampler3D uOccTexL1;
-layout(set=0, binding=5, r32ui) uniform uimage2D stepsImg;
+layout(set=0, binding=5, r32ui) writeonly uniform uimage2D stepsImg;
 
 const int STEPS_SCALE = 4;
 
@@ -156,7 +156,7 @@ void main() {
     }
     int totalSteps = steps0 + steps1;
     ivec2 coord = ivec2(gl_FragCoord.xy) / STEPS_SCALE;
-    imageAtomicAdd(stepsImg, coord, uint(totalSteps));
+    imageStore(stepsImg, coord, uvec4(uint(totalSteps),0,0,0));
     vec3 color = albedo;
     if(cam.debugLevel > 0.5) color = (steps0 > 0) ? vec3(0,1,0) : vec3(1,0,0);
     if(cam.debugSteps > 0.5) color = vec3(float(totalSteps) * 0.02);

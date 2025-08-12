@@ -24,7 +24,7 @@ layout(set=0, binding=4, std140) uniform VoxelAABB {
 
 layout(set=0, binding=5) uniform usampler3D uOccTex;
 layout(set=0, binding=6) uniform usampler3D uOccTexL1;
-layout(set=0, binding=7, r32ui) uniform uimage2D stepsImg;
+layout(set=0, binding=7, r32ui) writeonly uniform uimage2D stepsImg;
 
 const int STEPS_SCALE = 4;
 
@@ -140,7 +140,7 @@ void main() {
         bool hit = gridRaycast(sh, s1, s0);
         int totalSteps = s0 + s1;
         ivec2 coord = ivec2(gl_FragCoord.xy) / STEPS_SCALE;
-        imageAtomicAdd(stepsImg, coord, uint(totalSteps));
+        imageStore(stepsImg, coord, uvec4(uint(totalSteps),0,0,0));
         if(hit) vis = 0.0;
     }
     vec3 color = albedo * ndl * vis;
