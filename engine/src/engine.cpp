@@ -45,6 +45,12 @@ static std::filesystem::path exe_dir() {
 struct DrawCtx {
   PresentPipeline* pipe = nullptr;
   VkDescriptorSet   dset = VK_NULL_HANDLE;
+  VkPipeline        comp_pipe = VK_NULL_HANDLE;
+  VkPipelineLayout  comp_layout = VK_NULL_HANDLE;
+  VkDescriptorSet   comp_set = VK_NULL_HANDLE;
+  VkImage           occ_image = VK_NULL_HANDLE;
+  VkExtent3D        occ_dim{0,0,0};
+  bool              first_frame = true;
 };
 
 struct CameraUBO {
@@ -60,21 +66,14 @@ struct VoxelAABB {
   glm::ivec3 dim{0};   int pad2 = 0;
 };
 
-static std::vector<uint8_t> make_occ_grid(uint32_t N) {
-  std::vector<uint8_t> occ(N*N*N, 0);
-  auto fill = [&](uint32_t x0, uint32_t x1,
-                  uint32_t y0, uint32_t y1,
-                  uint32_t z0, uint32_t z1) {
-    for(uint32_t z=z0; z<z1; ++z)
-      for(uint32_t y=y0; y<y1; ++y)
-        for(uint32_t x=x0; x<x1; ++x)
-          occ[x + y*N + z*N*N] = 1;
-  };
-  uint32_t s = N/8;
-  fill(N/4, N/4+s, N/4, N/4+s, N/4, N/4+s);
-  fill(N/2, N/2+s, N/2, N/2+s, N/8, N/8+s);
-  return occ;
-}
+struct VoxParams {
+  glm::ivec3 dim{0}; int frame = 0;
+  glm::vec3 volMin{0.0f}; float pad0 = 0.0f;
+  glm::vec3 volMax{0.0f}; float pad1 = 0.0f;
+  glm::vec3 boxA{0.0f}; float pad2 = 0.0f;
+  glm::vec3 boxB{0.0f}; float pad3 = 0.0f;
+  glm::vec3 sphereCenter{0.0f}; float sphereRadius = 0.0f;
+};
 
 static VkShaderModule load_module(VkDevice dev, const std::string& path) {
   std::ifstream f(path, std::ios::ate | std::ios::binary);
@@ -94,6 +93,42 @@ static VkShaderModule load_module(VkDevice dev, const std::string& path) {
 static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
                            VkFormat, VkExtent2D extent, void* user) {
   auto* ctx = static_cast<DrawCtx*>(user);
+
+  VkImageMemoryBarrier pre{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+  pre.srcAccessMask = ctx->first_frame ? 0 : VK_ACCESS_SHADER_READ_BIT;
+  pre.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  pre.oldLayout = ctx->first_frame ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  pre.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+  pre.image = ctx->occ_image;
+  pre.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  pre.subresourceRange.levelCount = 1;
+  pre.subresourceRange.layerCount = 1;
+  VkPipelineStageFlags srcStage = ctx->first_frame ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                                                   : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+  vkCmdPipelineBarrier(cmd, srcStage, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       0, 0, nullptr, 0, nullptr, 1, &pre);
+
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_pipe);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_layout,
+                          0, 1, &ctx->comp_set, 0, nullptr);
+  const uint32_t gx = (ctx->occ_dim.width  + 7) / 8;
+  const uint32_t gy = (ctx->occ_dim.height + 7) / 8;
+  const uint32_t gz = (ctx->occ_dim.depth  + 7) / 8;
+  vkCmdDispatch(cmd, gx, gy, gz);
+
+  VkImageMemoryBarrier post{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+  post.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  post.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+  post.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+  post.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  post.image = ctx->occ_image;
+  post.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  post.subresourceRange.levelCount = 1;
+  post.subresourceRange.layerCount = 1;
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                       0, 0, nullptr, 0, nullptr, 1, &post);
+  ctx->first_frame = false;
 
   VkRenderingAttachmentInfo color{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
   color.imageView   = view;
@@ -197,16 +232,16 @@ int run() {
                                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
   Buffer vox_buf = create_buffer(allocator.raw(), sizeof(VoxelAABB),
                                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+  Buffer vox_params_buf = create_buffer(allocator.raw(), sizeof(VoxParams),
+                                        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+  const uint32_t N = 128;
   Image3D occ_img{};
   VkImageView occ_view = VK_NULL_HANDLE;
+  VkImageView occ_storage_view = VK_NULL_HANDLE;
   {
-    const uint32_t N = 128;
-    auto occ = make_occ_grid(N);
     occ_img = create_image3d(allocator.raw(), N, N, N,
                              VK_FORMAT_R8_UINT,
-                             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-    upload_image3d(allocator.raw(), device.device(), device.graphics_family(),
-                   device.graphics_queue(), occ.data(), occ.size(), occ_img);
+                             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
     VkImageViewCreateInfo ovi{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
     ovi.image = occ_img.image; ovi.viewType = VK_IMAGE_VIEW_TYPE_3D;
     ovi.format = VK_FORMAT_R8_UINT;
@@ -214,15 +249,76 @@ int run() {
     ovi.subresourceRange.levelCount = 1;
     ovi.subresourceRange.layerCount = 1;
     VK_CHECK(vkCreateImageView(device.device(), &ovi, nullptr, &occ_view));
+    VK_CHECK(vkCreateImageView(device.device(), &ovi, nullptr, &occ_storage_view));
   }
 
   // Upload static voxel bounds
   VoxelAABB vubo{};
   vubo.min = {0.0f,0.0f,0.0f};
-  vubo.max = {128.0f,128.0f,128.0f};
-  vubo.dim = {128,128,128};
+  vubo.max = {static_cast<float>(N),static_cast<float>(N),static_cast<float>(N)};
+  vubo.dim = {static_cast<int>(N),static_cast<int>(N),static_cast<int>(N)};
   upload_buffer(allocator.raw(), device.device(), device.graphics_family(),
                 device.graphics_queue(), vox_buf, &vubo, sizeof(vubo));
+
+  // Compute pipeline to generate voxel occupancy texture
+  VkDescriptorSetLayout comp_dsl = VK_NULL_HANDLE;
+  VkPipelineLayout      comp_layout = VK_NULL_HANDLE;
+  VkPipeline            comp_pipeline = VK_NULL_HANDLE;
+  VkDescriptorPool      comp_pool = VK_NULL_HANDLE;
+  VkDescriptorSet       comp_set  = VK_NULL_HANDLE;
+  {
+    VkDescriptorSetLayoutBinding binds[2]{};
+    binds[0].binding = 0; binds[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    binds[0].descriptorCount = 1; binds[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    binds[1].binding = 1; binds[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    binds[1].descriptorCount = 1; binds[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    VkDescriptorSetLayoutCreateInfo dlci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    dlci.bindingCount = 2; dlci.pBindings = binds;
+    VK_CHECK(vkCreateDescriptorSetLayout(device.device(), &dlci, nullptr, &comp_dsl));
+
+    VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci.setLayoutCount = 1; plci.pSetLayouts = &comp_dsl;
+    VK_CHECK(vkCreatePipelineLayout(device.device(), &plci, nullptr, &comp_layout));
+
+    const auto cs_path = (shader_dir / "procgen_voxels.comp.spv").string();
+    VkShaderModule cs = load_module(device.device(), cs_path);
+    VkPipelineShaderStageCreateInfo stage{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+    stage.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+    stage.module = cs;
+    stage.pName  = "main";
+    VkComputePipelineCreateInfo cpci{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+    cpci.stage = stage; cpci.layout = comp_layout;
+    VK_CHECK(vkCreateComputePipelines(device.device(), device.pipeline_cache(), 1, &cpci, nullptr, &comp_pipeline));
+    vkDestroyShaderModule(device.device(), cs, nullptr);
+
+    VkDescriptorPoolSize psizes[2]{};
+    psizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; psizes[0].descriptorCount = 1;
+    psizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; psizes[1].descriptorCount = 1;
+    VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    dpci.maxSets = 1; dpci.poolSizeCount = 2; dpci.pPoolSizes = psizes;
+    VK_CHECK(vkCreateDescriptorPool(device.device(), &dpci, nullptr, &comp_pool));
+
+    VkDescriptorSetAllocateInfo ai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    ai.descriptorPool = comp_pool; ai.descriptorSetCount = 1; ai.pSetLayouts = &comp_dsl;
+    VK_CHECK(vkAllocateDescriptorSets(device.device(), &ai, &comp_set));
+
+    VkDescriptorImageInfo img_info{};
+    img_info.imageView = occ_storage_view;
+    img_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkDescriptorBufferInfo param_bi{};
+    param_bi.buffer = vox_params_buf.buffer; param_bi.range = sizeof(VoxParams);
+    VkWriteDescriptorSet ws[2]{};
+    ws[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    ws[0].dstSet = comp_set; ws[0].dstBinding = 0;
+    ws[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    ws[0].descriptorCount = 1; ws[0].pImageInfo = &img_info;
+    ws[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    ws[1].dstSet = comp_set; ws[1].dstBinding = 1;
+    ws[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    ws[1].descriptorCount = 1; ws[1].pBufferInfo = &param_bi;
+    vkUpdateDescriptorSets(device.device(), 2, ws, 0, nullptr);
+  }
 
   std::unique_ptr<VulkanSwapchain>   swapchain;
   std::unique_ptr<VulkanCommands>    commands;
@@ -309,8 +405,12 @@ int run() {
     create_swapchain_stack(static_cast<uint32_t>(fb.first), static_cast<uint32_t>(fb.second)); }
 
   ctx.pipe = pipeline.get(); ctx.dset = dset;
+  ctx.comp_pipe = comp_pipeline; ctx.comp_layout = comp_layout; ctx.comp_set = comp_set;
+  ctx.occ_image = occ_img.image; ctx.occ_dim = {N, N, N};
+  ctx.first_frame = true;
   VkExtent2D last = swapchain->extent();
   float total_time = 0.0f;
+  int   frame_counter = 0;
   using namespace std::chrono_literals;
 
   while (!window->should_close()) {
@@ -369,6 +469,18 @@ int run() {
     upload_buffer(allocator.raw(), device.device(), device.graphics_family(),
                   device.graphics_queue(), cam_buf, &ubo, sizeof(ubo));
 
+    VoxParams vparams{};
+    vparams.dim = {static_cast<int>(N), static_cast<int>(N), static_cast<int>(N)};
+    vparams.frame = frame_counter++;
+    vparams.volMin = {0.0f, 0.0f, 0.0f};
+    vparams.volMax = {static_cast<float>(N), static_cast<float>(N), static_cast<float>(N)};
+    vparams.boxA = {20.0f,20.0f,20.0f};
+    vparams.boxB = {100.0f,100.0f,100.0f};
+    vparams.sphereCenter = {static_cast<float>(N)/2.0f, static_cast<float>(N)/2.0f, static_cast<float>(N)/2.0f};
+    vparams.sphereRadius = 30.0f;
+    upload_buffer(allocator.raw(), device.device(), device.graphics_family(),
+                  device.graphics_queue(), vox_params_buf, &vparams, sizeof(vparams));
+
     commands->acquire_record_present(
       swapchain->vk(),
       const_cast<VkImage*>(swapchain->images().data()),
@@ -386,10 +498,17 @@ int run() {
   pipeline.reset();
   if (dset) vkFreeDescriptorSets(device.device(), dpool, 1, &dset);
   if (dpool) vkDestroyDescriptorPool(device.device(), dpool, nullptr);
+  if (comp_set) vkFreeDescriptorSets(device.device(), comp_pool, 1, &comp_set);
+  if (comp_pool) vkDestroyDescriptorPool(device.device(), comp_pool, nullptr);
+  if (comp_pipeline) vkDestroyPipeline(device.device(), comp_pipeline, nullptr);
+  if (comp_layout) vkDestroyPipelineLayout(device.device(), comp_layout, nullptr);
+  if (comp_dsl) vkDestroyDescriptorSetLayout(device.device(), comp_dsl, nullptr);
+  if (occ_storage_view) vkDestroyImageView(device.device(), occ_storage_view, nullptr);
   if (occ_view) vkDestroyImageView(device.device(), occ_view, nullptr);
   destroy_image3d(allocator.raw(), occ_img);
   destroy_buffer(allocator.raw(), cam_buf);
   destroy_buffer(allocator.raw(), vox_buf);
+  destroy_buffer(allocator.raw(), vox_params_buf);
   vkDestroySampler(device.device(), nearest_sampler, nullptr);
   vkDestroySampler(device.device(), linear_sampler, nullptr);
   destroy_transfer_context();
