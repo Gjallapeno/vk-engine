@@ -1,40 +1,23 @@
 #version 460
 layout(local_size_x=8, local_size_y=8, local_size_z=8) in;
 
-layout(binding=0, std430) readonly buffer Occ { uint occ[]; };
+layout(binding=0) uniform usampler3D occL0;
 layout(r8ui, binding=1) uniform uimage3D occL1;
-
-const int N = 128;
-
-uint part1by2(uint x){
-    x &= 0x000003ffu;
-    x = (x | (x << 16)) & 0x30000ffu;
-    x = (x | (x << 8)) & 0x300f00fu;
-    x = (x | (x << 4)) & 0x30c30c3u;
-    x = (x | (x << 2)) & 0x9249249u;
-    return x;
-}
-
-uint morton3D(uvec3 v){
-    return part1by2(v.x) | (part1by2(v.y) << 1) | (part1by2(v.z) << 2);
-}
 
 void main(){
     ivec3 id = ivec3(gl_GlobalInvocationID);
-    ivec3 dim1 = ivec3(N/4);
+    ivec3 dim0 = textureSize(occL0, 0);
+    ivec3 dim1 = dim0 / 4;
     if(any(greaterThanEqual(id, dim1))) return;
     ivec3 base = id * 4;
-    uint occv = 0u;
-    for(int z=0; z<4 && occv==0; ++z){
-        for(int y=0; y<4 && occv==0; ++y){
+    uint occ = 0u;
+    for(int z=0; z<4 && occ==0; ++z){
+        for(int y=0; y<4 && occ==0; ++y){
             for(int x=0; x<4; ++x){
                 ivec3 p = base + ivec3(x,y,z);
-                uint m = morton3D(uvec3(p));
-                uint word = m >> 5;
-                uint bit = m & 31u;
-                if(((occ[word] >> bit) & 1u) != 0u){ occv = 1u; break; }
+                if(texelFetch(occL0, p, 0).r > 0u){ occ = 1u; break; }
             }
         }
     }
-    imageStore(occL1, id, uvec4(occv,0,0,0));
+    imageStore(occL1, id, uvec4(occ,0,0,0));
 }

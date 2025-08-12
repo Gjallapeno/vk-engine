@@ -20,8 +20,8 @@ layout(set=0, binding=1, std140) uniform VoxelAABB {
     ivec3 dim; int pad2;
 } vox;
 
-layout(set=0, binding=2, std430) readonly buffer Occ { uint occ[]; };
-layout(set=0, binding=3, std430) readonly buffer Mat { uvec2 mat[]; };
+layout(set=0, binding=2) uniform usampler3D uOccTex;
+layout(set=0, binding=3) uniform usampler3D uMatTex;
 layout(set=0, binding=4) uniform usampler3D uOccTexL1;
 layout(set=0, binding=5, r32ui) uniform uimage2D stepsImg;
 
@@ -39,35 +39,6 @@ Ray makeRay(vec2 p) {
 }
 
 // Fine DDA on the full-resolution voxel grid
-uint part1by2(uint x){
-    x &= 0x000003ffu;
-    x = (x | (x << 16)) & 0x30000ffu;
-    x = (x | (x << 8)) & 0x300f00fu;
-    x = (x | (x << 4)) & 0x30c30c3u;
-    x = (x | (x << 2)) & 0x9249249u;
-    return x;
-}
-
-uint morton3D(uvec3 v){
-    return part1by2(v.x) | (part1by2(v.y) << 1) | (part1by2(v.z) << 2);
-}
-
-uint loadOcc(ivec3 p){
-    uint m = morton3D(uvec3(p));
-    uint word = m >> 5;
-    uint bit = m & 31u;
-    return (occ[word] >> bit) & 1u;
-}
-
-uint loadMat(ivec3 p){
-    uint m = morton3D(uvec3(p));
-    uint word = m >> 5;
-    uint idx = m & 31u;
-    uint shift = idx * 2u;
-    uvec2 w = mat[word];
-    return shift < 32u ? (w.x >> shift) & 0x3u : (w.y >> (shift - 32u)) & 0x3u;
-}
-
 bool gridRaycastL0(Ray r, out ivec3 cell, out int hitFace, out float tHit, out int steps) {
     steps = 0;
     vec3 invD = 1.0 / r.d;
@@ -93,7 +64,7 @@ bool gridRaycastL0(Ray r, out ivec3 cell, out int hitFace, out float tHit, out i
     for(int i=0;i<1024;i++){
         if(any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, vox.dim))) break;
         steps++;
-        if(loadOcc(cell) > 0u){ tHit = t; return true; }
+        if(texelFetch(uOccTex, cell, 0).r > 0u){ tHit = t; return true; }
         if(tMax.x < tMax.y){
             if(tMax.x < tMax.z){
                 cell.x += step.x; t = tMax.x; tMax.x += tDelta.x; hitFace = step.x > 0 ? 0 : 1;
@@ -170,7 +141,7 @@ void main() {
     vec3 normal = vec3(0.0);
     float depth = 0.0;
     if (gridRaycast(r, cell, face, t, steps1, steps0)) {
-        uint m = loadMat(cell);
+        uint m = texelFetch(uMatTex, cell, 0).r;
         if(m == 1u)      albedo = vec3(0.55,0.27,0.07); // terrain
         else if(m == 2u) albedo = vec3(0.1,0.8,0.1);    // foliage
         else if(m == 3u) albedo = vec3(0.5,0.5,0.5);    // rock

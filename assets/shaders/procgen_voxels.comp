@@ -1,9 +1,9 @@
 #version 460
 layout (local_size_x=8, local_size_y=8, local_size_z=8) in;
 
-// Storage buffers for occupancy and material bitfields
-layout (binding=0, std430) buffer Occ { uint occ[]; };
-layout (binding=1, std430) buffer Mat { uvec2 mat[]; };
+// Storage images for occupancy and material IDs
+layout (r8ui, binding=0) uniform uimage3D occOut;
+layout (r8ui, binding=1) uniform uimage3D matOut;
 
 // Modes for P.mode
 const int MODE_CLEAR       = 0;
@@ -58,22 +58,14 @@ float fbm(vec2 p){
     return v;
 }
 
-uint part1by2(uint x){
-    x &= 0x000003ffu;
-    x = (x | (x << 16)) & 0x30000ffu;
-    x = (x | (x << 8)) & 0x300f00fu;
-    x = (x | (x << 4)) & 0x30c30c3u;
-    x = (x | (x << 2)) & 0x9249249u;
-    return x;
-}
-
-uint morton3D(uvec3 v){
-    return part1by2(v.x) | (part1by2(v.y) << 1) | (part1by2(v.z) << 2);
-}
-
 void main(){
     ivec3 p = ivec3(gl_GlobalInvocationID.xyz) + P.regionMin;
     if (any(greaterThanEqual(p, P.regionMax))) return;
+
+    // Vulkan's texture coordinate system has (0,0,0) at the image's top-left
+    // corner. Our world space assumes Y=0 at the bottom, so flip the Y axis
+    // when accessing the storage images to keep terrain upright.
+    ivec3 imgp = ivec3(p.x, P.dim.y - 1 - p.y, p.z);
 
     uint shape = 0u;
     uint shapeMat = uint(P.material);
@@ -115,13 +107,8 @@ void main(){
         }
     }
 
-    uint morton = morton3D(uvec3(p));
-    uint word = morton >> 5;
-    uint bit = morton & 31u;
-    uint prev = (occ[word] >> bit) & 1u;
-    uint shift = (morton & 31u) * 2u;
-    uvec2 mword = mat[word];
-    uint prevMat = shift < 32u ? (mword.x >> shift) & 3u : (mword.y >> (shift - 32u)) & 3u;
+    uint prev = imageLoad(occOut, imgp).r;
+    uint prevMat = imageLoad(matOut, imgp).r;
     uint v = prev;
     uint matv = prevMat;
     if(P.mode == MODE_CLEAR){
@@ -141,21 +128,6 @@ void main(){
             else { v = prev; matv = prevMat; }
         }
     }
-    if(v != prev){
-        uint mask = 1u << bit;
-        if(v == 1u) atomicOr(occ[word], mask);
-        else atomicAnd(occ[word], ~mask);
-    }
-    if(matv != prevMat){
-        if(shift < 32u){
-            uint mask = 0x3u << shift;
-            atomicAnd(mat[word].x, ~mask);
-            atomicOr(mat[word].x, (matv & 0x3u) << shift);
-        }else{
-            uint s = shift - 32u;
-            uint mask = 0x3u << s;
-            atomicAnd(mat[word].y, ~mask);
-            atomicOr(mat[word].y, (matv & 0x3u) << s);
-        }
-    }
+    imageStore(occOut, imgp, uvec4(v,0,0,0));
+    imageStore(matOut, imgp, uvec4(matv,0,0,0));
 }

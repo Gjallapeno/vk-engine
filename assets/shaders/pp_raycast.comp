@@ -2,7 +2,7 @@
 layout (local_size_x=8, local_size_y=8) in;
 layout (rgba16f, binding=0) writeonly uniform image2D outImg;
 
-layout(binding=2, std430) readonly buffer Occ { uint occ[]; };
+layout(binding=2) uniform usampler3D uOccGrid;
 
 layout (std140, binding=1) uniform Camera {
     mat4 invViewProj;
@@ -12,28 +12,6 @@ layout (std140, binding=1) uniform Camera {
     vec4 worldMin;
     vec4 worldMax;
 } cam;
-
-const int N = 128;
-
-uint part1by2(uint x){
-    x &= 0x000003ffu;
-    x = (x | (x << 16)) & 0x30000ffu;
-    x = (x | (x << 8)) & 0x300f00fu;
-    x = (x | (x << 4)) & 0x30c30c3u;
-    x = (x | (x << 2)) & 0x9249249u;
-    return x;
-}
-
-uint morton3D(uvec3 v){
-    return part1by2(v.x) | (part1by2(v.y) << 1) | (part1by2(v.z) << 2);
-}
-
-uint loadOcc(ivec3 p){
-    uint m = morton3D(uvec3(p));
-    uint word = m >> 5;
-    uint bit = m & 31u;
-    return (occ[word] >> bit) & 1u;
-}
 
 struct Ray { vec3 o; vec3 d; };
 
@@ -58,7 +36,7 @@ bool gridRaycast(Ray r, out ivec3 cell, out int hitFace){
     float t = max(t0, 0.0);
     vec3 pos = r.o + t * r.d;
 
-    ivec3 gridSize = ivec3(N);
+    ivec3 gridSize = textureSize(uOccGrid, 0);
     vec3 rel = (pos - cam.worldMin.xyz) / (cam.worldMax.xyz - cam.worldMin.xyz);
     vec3 cellf = rel * vec3(gridSize);
     cell = ivec3(clamp(floor(cellf), vec3(0.0), vec3(gridSize) - vec3(1.0)));
@@ -71,7 +49,7 @@ bool gridRaycast(Ray r, out ivec3 cell, out int hitFace){
     hitFace = -1;
     for(int i=0;i<1024;i++){
         if(any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, gridSize))) break;
-        if(loadOcc(cell) > 0u) return true;
+        if(texelFetch(uOccGrid, cell, 0).r > 0u) return true;
         if(tMax.x < tMax.y){
             if(tMax.x < tMax.z){
                 cell.x += step.x; tMax.x += tDelta.x; hitFace = step.x > 0 ? 0 : 1;
