@@ -109,13 +109,11 @@ bool gridRaycast(Ray r, out ivec3 cell, out int hitFace, out float tHit, out int
     for(int i=0;i<1024;i++){
         if(any(lessThan(cell1, ivec3(0))) || any(greaterThanEqual(cell1, dim1))) break;
         if(texelFetch(uOccTexL1, cell1, 0).r > 0u){
-            // Start slightly inside this L1 cell to avoid re-testing boundary
-            Ray r2; r2.o = pos + r.d * 1e-3; r2.d = r.d;
+            Ray r2; r2.o = pos; r2.d = r.d;
             float tLocal; int s0;
             bool hit = gridRaycastL0(r2, cell, hitFace, tLocal, s0);
             stepsL0 += s0;
-            if(hit){ tHit = t + tLocal; return true; }
-            // MISS -> keep marching to next L1 cell
+            if(hit){ tHit = t + tLocal; return true; } else return false;
         }
         stepsL1++;
         if(tMax.x < tMax.y){
