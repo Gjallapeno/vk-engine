@@ -402,9 +402,12 @@ void upload_image2d(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1;
   si.pCommandBuffers = &ctx.cmd;
-  VK_CHECK(vkResetFences(ctx.device, 1, &ctx.fence));
-  VK_CHECK(vkQueueSubmit(queue, 1, &si, ctx.fence));
-  VK_CHECK(vkWaitForFences(ctx.device, 1, &ctx.fence, VK_TRUE, UINT64_MAX));
+  VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+  VkFence fence = VK_NULL_HANDLE;
+  VK_CHECK(vkCreateFence(ctx.device, &fi, nullptr, &fence));
+  VK_CHECK(vkQueueSubmit(queue, 1, &si, fence));
+  VK_CHECK(vkWaitForFences(ctx.device, 1, &fence, VK_TRUE, UINT64_MAX));
+  vkDestroyFence(ctx.device, fence, nullptr);
 
   vmaDestroyBuffer(alloc, stagingBuf, stagingAlloc);
 }
