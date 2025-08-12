@@ -1,5 +1,6 @@
-﻿add_library(engine STATIC
+add_library(engine STATIC
   src/engine.cpp
+  src/camera.cpp
   src/core/log.cpp
   src/core/vk_checks.cpp
   src/gfx/vulkan_instance.cpp
@@ -40,10 +41,12 @@ target_compile_definitions(engine PRIVATE
 # --- Dependencies
 # Vulkan was already found in the root CMakeLists
 find_package(VulkanMemoryAllocator CONFIG REQUIRED)  # from vcpkg
+find_package(glm CONFIG REQUIRED)
 
 target_link_libraries(engine PRIVATE
   Vulkan::Vulkan
   GPUOpen::VulkanMemoryAllocator
+  glm::glm
   glfw
   spdlog::spdlog
 )

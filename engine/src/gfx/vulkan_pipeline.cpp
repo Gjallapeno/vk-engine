@@ -41,10 +41,10 @@ TrianglePipeline::TrianglePipeline(const TrianglePipelineCreateInfo& ci)
   dlci.pBindings = &sam;
   VK_CHECK(vkCreateDescriptorSetLayout(dev_, &dlci, nullptr, &dset_layout_));
 
-  // Pipeline layout: push constant (float aspect) + set layout
+  // Pipeline layout: push constant (mat4 view-projection) + set layout
   VkPushConstantRange pcr{};
   pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-  pcr.offset = 0; pcr.size = sizeof(float);
+  pcr.offset = 0; pcr.size = sizeof(float) * 16;
 
   VkPipelineLayoutCreateInfo lci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
   lci.setLayoutCount = 1;
