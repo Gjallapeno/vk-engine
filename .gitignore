@@ -1,0 +1,55 @@
+# Build artifacts
+/build/
+/out/
+/bin/
+/lib/
+/obj/
+/*.pdb
+/*.ilk
+/*.idb
+/*.tlog
+/*.lastbuildstate
+/*.recipe
+
+# CMake build files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+
+# Visual Studio files
+*.vcxproj*
+*.sln
+*.user
+*.filters
+*.opensdf
+*.sdf
+*.ipch
+*.db
+*.opendb
+
+# Vcpkg installed artifacts
+/vcpkg_installed/
+/build/vcpkg_installed/
+/build/vcpkg-manifest-install.log
+
+# DLLs and other binaries
+*.exe
+*.dll
+*.lib
+*.so
+*.dylib
+*.a
+
+# Shader binaries
+*.spv
+
+# Logs
+*.log
+
+# OS-specific
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
