@@ -154,16 +154,28 @@ int run() {
     VkImageViewCreateInfo vi{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
     vi.image = img.image; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = VK_FORMAT_R8G8B8A8_UNORM;
     vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    vi.subresourceRange.levelCount = 1; vi.subresourceRange.layerCount = 1;
+    vi.subresourceRange.levelCount = img.mip_levels; vi.subresourceRange.layerCount = 1;
     VK_CHECK(vkCreateImageView(device.device(), &vi, nullptr, &view));
   }
   VkSampler sampler = VK_NULL_HANDLE;
   {
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(device.physical(), &props);
+    VkPhysicalDeviceFeatures feats{};
+    vkGetPhysicalDeviceFeatures(device.physical(), &feats);
+
     VkSamplerCreateInfo si{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
     si.magFilter = VK_FILTER_LINEAR; si.minFilter = VK_FILTER_LINEAR;
-    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
     si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    si.maxAnisotropy = 1.0f;
+    si.minLod = 0.0f; si.maxLod = static_cast<float>(img.mip_levels);
+    if (feats.samplerAnisotropy) {
+      si.anisotropyEnable = VK_TRUE;
+      si.maxAnisotropy = props.limits.maxSamplerAnisotropy;
+    } else {
+      si.anisotropyEnable = VK_FALSE;
+      si.maxAnisotropy = 1.0f;
+    }
     VK_CHECK(vkCreateSampler(device.device(), &si, nullptr, &sampler));
   }
 

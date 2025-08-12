@@ -142,11 +142,11 @@ void upload_buffer(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
 }
 
 // ---------- images ----------
-static VkImageSubresourceRange full_color() {
+static VkImageSubresourceRange full_color(uint32_t levels) {
   VkImageSubresourceRange r{};
   r.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
   r.baseMipLevel = 0;
-  r.levelCount = 1;
+  r.levelCount = levels;
   r.baseArrayLayer = 0;
   r.layerCount = 1;
   return r;
@@ -157,16 +157,23 @@ Image2D create_image2d(VmaAllocator alloc, uint32_t w, uint32_t h,
   Image2D img{};
   img.width = w;
   img.height = h;
+  img.mip_levels = 1;
+  uint32_t max_dim = (w > h) ? w : h;
+  while (max_dim > 1) {
+    max_dim >>= 1;
+    img.mip_levels++;
+  }
 
   VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
   ici.imageType = VK_IMAGE_TYPE_2D;
   ici.format = format;
   ici.extent = {w, h, 1};
-  ici.mipLevels = 1;
+  ici.mipLevels = img.mip_levels;
   ici.arrayLayers = 1;
   ici.samples = VK_SAMPLE_COUNT_1_BIT;
   ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-  ici.usage = usage | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  ici.usage =
+      usage | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
   ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
   VmaAllocationCreateInfo aci{};
@@ -223,7 +230,7 @@ void upload_image2d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
   to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
   to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
   to_dst.image = dst.image;
-  to_dst.subresourceRange = full_color();
+  to_dst.subresourceRange = full_color(dst.mip_levels);
 
   vkCmdPipelineBarrier(g_transfer.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
@@ -231,24 +238,76 @@ void upload_image2d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
 
   VkBufferImageCopy region{};
   region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  region.imageSubresource.mipLevel = 0;
   region.imageSubresource.layerCount = 1;
   region.imageExtent = {dst.width, dst.height, 1};
   vkCmdCopyBufferToImage(g_transfer.cmd, stagingBuf, dst.image,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-  VkImageMemoryBarrier to_read{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-  to_read.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  to_read.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-  to_read.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-  to_read.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-  to_read.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  to_read.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-  to_read.image = dst.image;
-  to_read.subresourceRange = full_color();
+  uint32_t mip_w = dst.width;
+  uint32_t mip_h = dst.height;
+  for (uint32_t i = 1; i < dst.mip_levels; ++i) {
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = dst.image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseMipLevel = i - 1;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+    vkCmdPipelineBarrier(g_transfer.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                         nullptr, 1, &barrier);
 
+    VkImageBlit blit{};
+    blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blit.srcSubresource.mipLevel = i - 1;
+    blit.srcSubresource.baseArrayLayer = 0;
+    blit.srcSubresource.layerCount = 1;
+    blit.srcOffsets[0] = {0, 0, 0};
+    blit.srcOffsets[1] = {static_cast<int32_t>(mip_w), static_cast<int32_t>(mip_h), 1};
+    mip_w = mip_w > 1 ? mip_w / 2 : 1;
+    mip_h = mip_h > 1 ? mip_h / 2 : 1;
+    blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blit.dstSubresource.mipLevel = i;
+    blit.dstSubresource.baseArrayLayer = 0;
+    blit.dstSubresource.layerCount = 1;
+    blit.dstOffsets[0] = {0, 0, 0};
+    blit.dstOffsets[1] = {static_cast<int32_t>(mip_w), static_cast<int32_t>(mip_h), 1};
+    vkCmdBlitImage(g_transfer.cmd, dst.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   dst.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                   VK_FILTER_LINEAR);
+
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    vkCmdPipelineBarrier(g_transfer.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr,
+                         0, nullptr, 1, &barrier);
+  }
+
+  VkImageMemoryBarrier last{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+  last.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  last.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+  last.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  last.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  last.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  last.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  last.image = dst.image;
+  last.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  last.subresourceRange.baseMipLevel = dst.mip_levels - 1;
+  last.subresourceRange.levelCount = 1;
+  last.subresourceRange.baseArrayLayer = 0;
+  last.subresourceRange.layerCount = 1;
   vkCmdPipelineBarrier(g_transfer.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
-                       nullptr, 1, &to_read);
+                       nullptr, 1, &last);
 
   VK_CHECK(vkEndCommandBuffer(g_transfer.cmd));
 

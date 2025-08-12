@@ -41,6 +41,7 @@ struct Image2D {
   VkImage image = VK_NULL_HANDLE;
   VmaAllocation allocation = nullptr;
   uint32_t width = 0, height = 0;
+  uint32_t mip_levels = 1;
 };
 
 Image2D create_image2d(VmaAllocator alloc, uint32_t w, uint32_t h,
