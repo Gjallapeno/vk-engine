@@ -26,10 +26,12 @@ public:
   uint32_t present_family()  const { return q_present_index_; }
   VkQueue  graphics_queue()  const { return q_gfx_; }
   VkQueue  present_queue()   const { return q_present_; }
+  VkPipelineCache pipeline_cache() const { return cache_; }
 
 private:
   void pick_physical(VkInstance instance, VkSurfaceKHR surface);
   void create_logical(bool enable_validation);
+  void create_pipeline_cache();
 
   VkInstance instance_ = VK_NULL_HANDLE;
   VkSurfaceKHR surface_ = VK_NULL_HANDLE;
@@ -41,6 +43,7 @@ private:
   uint32_t q_present_index_ = ~0u;
   VkQueue  q_gfx_ = VK_NULL_HANDLE;
   VkQueue  q_present_ = VK_NULL_HANDLE;
+  VkPipelineCache cache_ = VK_NULL_HANDLE;
 };
 
 } // namespace engine

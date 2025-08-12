@@ -6,6 +6,7 @@ namespace engine {
 
 struct TrianglePipelineCreateInfo {
   VkDevice device = VK_NULL_HANDLE;
+  VkPipelineCache pipeline_cache = VK_NULL_HANDLE;
   VkFormat color_format = VK_FORMAT_UNDEFINED;
   std::string vs_spv;
   std::string fs_spv;

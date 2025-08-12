@@ -188,6 +188,7 @@ int run() {
     if (!pipeline || pipeline->color_format() != swapchain->image_format()) {
       TrianglePipelineCreateInfo pci{};
       pci.device = device.device();
+      pci.pipeline_cache = device.pipeline_cache();
       pci.color_format = swapchain->image_format();
       pci.vs_spv = vs_path; pci.fs_spv = fs_path;
       pipeline = std::make_unique<TrianglePipeline>(pci);
