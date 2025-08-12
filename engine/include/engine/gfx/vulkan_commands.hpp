@@ -44,6 +44,7 @@ private:
 
   struct Frame {
     VkSemaphore     timeline    = VK_NULL_HANDLE;
+    VkSemaphore     acquire     = VK_NULL_HANDLE;
     uint64_t        value       = 0;            // last signaled value
     VkCommandPool   cmd_pool    = VK_NULL_HANDLE;
     VkCommandBuffer cmd         = VK_NULL_HANDLE;

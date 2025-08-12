@@ -26,6 +26,10 @@ VulkanCommands::VulkanCommands(const VulkanCommandsCreateInfo& ci)
     sci.pNext = &tci;
     VK_CHECK(vkCreateSemaphore(dev_, &sci, nullptr, &f.timeline));
 
+    // Binary semaphore for swapchain image acquisition
+    sci.pNext = nullptr;
+    VK_CHECK(vkCreateSemaphore(dev_, &sci, nullptr, &f.acquire));
+
     VkCommandPoolCreateInfo pci{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
     pci.queueFamilyIndex = gfx_family_;
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -46,6 +50,7 @@ VulkanCommands::~VulkanCommands() {
   for (auto& f : frames_) {
     if (f.cmd)            vkFreeCommandBuffers(dev_, f.cmd_pool, 1, &f.cmd);
     if (f.cmd_pool)       vkDestroyCommandPool(dev_, f.cmd_pool, nullptr);
+    if (f.acquire)        vkDestroySemaphore(dev_, f.acquire, nullptr);
     if (f.timeline)       vkDestroySemaphore(dev_, f.timeline, nullptr);
   }
 }
@@ -72,8 +77,7 @@ uint32_t VulkanCommands::acquire_record_present(
 
   // Acquire image
   uint32_t image_index = 0;
-  uint64_t acquire_value = f.value + 1;
-  VkResult acq = vkAcquireNextImageKHR(dev_, swapchain, UINT64_MAX, f.timeline, VK_NULL_HANDLE, &image_index);
+  VkResult acq = vkAcquireNextImageKHR(dev_, swapchain, UINT64_MAX, f.acquire, VK_NULL_HANDLE, &image_index);
   if (acq == VK_ERROR_OUT_OF_DATE_KHR) {
     spdlog::warn("[vk] Acquire returned OUT_OF_DATE (resize will recreate).");
     return image_index;
@@ -135,10 +139,8 @@ uint32_t VulkanCommands::acquire_record_present(
   f.first_use = false;
 
   // Submit
-  uint64_t submit_signal_value = acquire_value + 1;
+  uint64_t submit_signal_value = f.value + 1;
   VkTimelineSemaphoreSubmitInfo tsi{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
-  tsi.waitSemaphoreValueCount = 1;
-  tsi.pWaitSemaphoreValues = &acquire_value;
   tsi.signalSemaphoreValueCount = 1;
   tsi.pSignalSemaphoreValues = &submit_signal_value;
 
@@ -146,7 +148,7 @@ uint32_t VulkanCommands::acquire_record_present(
   VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
   si.pNext = &tsi;
   si.waitSemaphoreCount = 1;
-  si.pWaitSemaphores = &f.timeline;
+  si.pWaitSemaphores = &f.acquire;
   si.pWaitDstStageMask = &wait_stage;
   si.commandBufferCount = 1;
   si.pCommandBuffers = &f.cmd;
