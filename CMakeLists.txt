@@ -50,12 +50,14 @@ compile_shader(TRI_FS ${SHADER_SRC_DIR}/tri.frag frag)
 compile_shader(TEX_VS ${SHADER_SRC_DIR}/tex.vert vert)
 compile_shader(TEX_FS ${SHADER_SRC_DIR}/tex.frag frag)
 compile_shader(RAY_CS ${SHADER_SRC_DIR}/pp_raycast.comp comp)
+compile_shader(PRESENT_VS ${SHADER_SRC_DIR}/vs_fullscreen.vert vert)
+compile_shader(PRESENT_FS ${SHADER_SRC_DIR}/fs_present.frag frag)
 
-add_custom_target(shaders ALL DEPENDS ${TRI_VS} ${TRI_FS} ${TEX_VS} ${TEX_FS} ${RAY_CS})
+add_custom_target(shaders ALL DEPENDS ${TRI_VS} ${TRI_FS} ${TEX_VS} ${TEX_FS} ${RAY_CS} ${PRESENT_VS} ${PRESENT_FS})
 
 # Copy SPIR-V next to vk_app.exe (e.g., build/app/Debug/shaders)
 add_custom_command(TARGET shaders POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:vk_app>/shaders
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
-          ${TRI_VS} ${TRI_FS} ${TEX_VS} ${TEX_FS} ${RAY_CS} $<TARGET_FILE_DIR:vk_app>/shaders
+          ${TRI_VS} ${TRI_FS} ${TEX_VS} ${TEX_FS} ${RAY_CS} ${PRESENT_VS} ${PRESENT_FS} $<TARGET_FILE_DIR:vk_app>/shaders
 )

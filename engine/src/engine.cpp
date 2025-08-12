@@ -9,7 +9,7 @@
 #include <engine/gfx/vulkan_device.hpp>
 #include <engine/gfx/vulkan_swapchain.hpp>
 #include <engine/gfx/vulkan_commands.hpp>
-#include <engine/gfx/vulkan_pipeline.hpp>
+#include <engine/gfx/present_pipeline.hpp>
 #include <engine/gfx/memory.hpp>
 #include <engine/camera.hpp>
 
@@ -42,16 +42,8 @@ static std::filesystem::path exe_dir() {
 }
 
 struct DrawCtx {
-  TrianglePipeline* pipe = nullptr;
+  PresentPipeline* pipe = nullptr;
   VkDescriptorSet   dset = VK_NULL_HANDLE;
-  VkBuffer          vbo  = VK_NULL_HANDLE;
-  VkBuffer          ibo  = VK_NULL_HANDLE;
-  VkIndexType       index_type = VK_INDEX_TYPE_UINT16;
-  const std::vector<VkImage>* swap_images = nullptr;
-  std::vector<Image2D>        depth_images;
-  std::vector<VkImageView>    depth_views;
-  std::vector<bool>           depth_first_use;
-  glm::mat4                  view_proj{1.0f};
   // compute resources
   VkPipeline       comp_pipe = VK_NULL_HANDLE;
   VkPipelineLayout comp_layout = VK_NULL_HANDLE;
@@ -85,16 +77,9 @@ static VkShaderModule load_module(VkDevice dev, const std::string& path) {
   return mod;
 }
 
-static void record_textured(VkCommandBuffer cmd, VkImage swap_img, VkImageView view,
-                            VkFormat, VkExtent2D extent, void* user) {
+static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
+                           VkFormat, VkExtent2D extent, void* user) {
   auto* ctx = static_cast<DrawCtx*>(user);
-
-  uint32_t idx = 0;
-  if (ctx->swap_images) {
-    for (uint32_t i = 0; i < ctx->swap_images->size(); ++i) {
-      if ((*ctx->swap_images)[i] == swap_img) { idx = i; break; }
-    }
-  }
 
   // compute pass writes to voxel image
   VkImageMemoryBarrier to_comp{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
@@ -141,28 +126,6 @@ static void record_textured(VkCommandBuffer cmd, VkImage swap_img, VkImageView v
                        0, 0, nullptr, 0, nullptr, 1, &to_sample);
   ctx->voxel_first_use = false;
 
-  VkImageView depth_view = ctx->depth_views[idx];
-  if (ctx->depth_first_use[idx]) {
-    VkImageMemoryBarrier to_depth{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-    to_depth.srcAccessMask = 0;
-    to_depth.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    to_depth.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    to_depth.newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    to_depth.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_depth.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    to_depth.image = ctx->depth_images[idx].image;
-    to_depth.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    to_depth.subresourceRange.baseMipLevel = 0;
-    to_depth.subresourceRange.levelCount = 1;
-    to_depth.subresourceRange.baseArrayLayer = 0;
-    to_depth.subresourceRange.layerCount = 1;
-    vkCmdPipelineBarrier(cmd,
-                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &to_depth);
-    ctx->depth_first_use[idx] = false;
-  }
-
   VkRenderingAttachmentInfo color{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
   color.imageView   = view;
   color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -171,21 +134,12 @@ static void record_textured(VkCommandBuffer cmd, VkImage swap_img, VkImageView v
   VkClearValue clear; clear.color = { {0.06f, 0.07f, 0.10f, 1.0f} };
   color.clearValue = clear;
 
-  VkRenderingAttachmentInfo depth{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
-  depth.imageView   = depth_view;
-  depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-  depth.loadOp  = VK_ATTACHMENT_LOAD_OP_CLEAR;
-  depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-  VkClearValue dclear; dclear.depthStencil = {1.0f, 0};
-  depth.clearValue = dclear;
-
   VkRenderingInfo ri{ VK_STRUCTURE_TYPE_RENDERING_INFO };
   ri.renderArea.offset = {0, 0};
   ri.renderArea.extent = extent;
   ri.layerCount = 1;
   ri.colorAttachmentCount = 1;
   ri.pColorAttachments = &color;
-  ri.pDepthAttachment = &depth;
 
   vkCmdBeginRendering(cmd, &ri);
 
@@ -202,19 +156,10 @@ static void record_textured(VkCommandBuffer cmd, VkImage swap_img, VkImageView v
   vkCmdSetScissor(cmd, 0, 1, &sc);
 
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipe->pipeline());
-
-  vkCmdPushConstants(cmd, ctx->pipe->layout(), VK_SHADER_STAGE_VERTEX_BIT, 0,
-                     sizeof(glm::mat4), &ctx->view_proj);
-
-  VkBuffer vbos[] = { ctx->vbo };
-  VkDeviceSize offs[] = { 0 };
-  vkCmdBindVertexBuffers(cmd, 0, 1, vbos, offs);
-  vkCmdBindIndexBuffer(cmd, ctx->ibo, 0, ctx->index_type);
-
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipe->layout(),
                           0, 1, &ctx->dset, 0, nullptr);
 
-  vkCmdDrawIndexed(cmd, 6, 1, 0, 0, 0);
+  vkCmdDraw(cmd, 3, 1, 0, 0);
   vkCmdEndRendering(cmd);
 }
 
@@ -222,7 +167,7 @@ int run() {
   init_logging();
   log_boot_banner("engine");
 
-  WindowDesc wdesc{}; wdesc.title = "vk_engine Step 11 (textured quad)";
+  WindowDesc wdesc{}; wdesc.title = "vk_engine fullscreen present";
   auto window = create_window(wdesc);
 
   Camera cam;
@@ -240,28 +185,11 @@ int run() {
   VulkanDevice device{dci};
 
   const auto shader_dir = exe_dir() / "shaders";
-  const auto vs_path = (shader_dir / "tex.vert.spv").string();
-  const auto fs_path = (shader_dir / "tex.frag.spv").string();
+  const auto vs_path = (shader_dir / "vs_fullscreen.vert.spv").string();
+  const auto fs_path = (shader_dir / "fs_present.frag.spv").string();
   spdlog::info("[vk] Using shaders: {}", shader_dir.string());
 
   GpuAllocator allocator; allocator.init(instance.vk(), device.physical(), device.device());
-
-  // Rectangle geometry (CCW order)
-  const float verts[] = {
-    //   x,     y,     z,     u,   v
-    -0.9f, -0.6f,  0.0f,  0.0f, 1.0f,  // 0: bottom-left
-     0.9f, -0.6f,  0.0f,  1.0f, 1.0f,  // 1: bottom-right
-     0.9f,  0.6f,  0.0f,  1.0f, 0.0f,  // 2: top-right
-    -0.9f,  0.6f,  0.0f,  0.0f, 0.0f   // 3: top-left
-  };
-  const uint16_t indices[] = { 0, 1, 2, 2, 3, 0 };
-
-  Buffer vbo = create_buffer(allocator.raw(), sizeof(verts), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-  upload_buffer(allocator.raw(), device.device(), device.graphics_family(), device.graphics_queue(),
-                vbo, verts, sizeof(verts));
-  Buffer ibo = create_buffer(allocator.raw(), sizeof(indices), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-  upload_buffer(allocator.raw(), device.device(), device.graphics_family(), device.graphics_queue(),
-                ibo, indices, sizeof(indices));
 
   // Samplers for sampled images
   VkSampler linear_sampler  = VK_NULL_HANDLE;
@@ -385,7 +313,7 @@ int run() {
 
   std::unique_ptr<VulkanSwapchain>   swapchain;
   std::unique_ptr<VulkanCommands>    commands;
-  std::unique_ptr<TrianglePipeline>  pipeline;
+  std::unique_ptr<PresentPipeline>  pipeline;
 
   VkDescriptorPool dpool = VK_NULL_HANDLE;
   VkDescriptorSet  dset  = VK_NULL_HANDLE;
@@ -411,11 +339,6 @@ int run() {
     ctx.voxel_view = VK_NULL_HANDLE;
     destroy_image2d(allocator.raw(), ctx.voxel_img);
     ctx.voxel_first_use = true;
-    for (auto v : ctx.depth_views) vkDestroyImageView(device.device(), v, nullptr);
-    ctx.depth_views.clear();
-    for (auto& di : ctx.depth_images) destroy_image2d(allocator.raw(), di);
-    ctx.depth_images.clear();
-    ctx.depth_first_use.clear();
     commands.reset();
     swapchain.reset();
   };
@@ -446,13 +369,12 @@ int run() {
     ctx.voxel_first_use = true;
 
     if (!pipeline || pipeline->color_format() != swapchain->image_format()) {
-      TrianglePipelineCreateInfo pci{};
+      PresentPipelineCreateInfo pci{};
       pci.device = device.device();
       pci.pipeline_cache = device.pipeline_cache();
       pci.color_format = swapchain->image_format();
-      pci.depth_format = VK_FORMAT_D32_SFLOAT;
       pci.vs_spv = vs_path; pci.fs_spv = fs_path;
-      pipeline = std::make_unique<TrianglePipeline>(pci);
+      pipeline = std::make_unique<PresentPipeline>(pci);
     }
 
     if (dset) {
@@ -481,31 +403,12 @@ int run() {
     wcomp.pImageInfo = &si;
     vkUpdateDescriptorSets(device.device(), 1, &wcomp, 0, nullptr);
 
-    ctx.swap_images = &swapchain->images();
-    size_t count = swapchain->image_views().size();
-    ctx.depth_images.resize(count);
-    ctx.depth_views.resize(count);
-    ctx.depth_first_use.assign(count, true);
-    for (size_t i = 0; i < count; ++i) {
-      ctx.depth_images[i] = create_image2d(allocator.raw(), swapchain->extent().width,
-                                          swapchain->extent().height,
-                                          VK_FORMAT_D32_SFLOAT,
-                                          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
-      VkImageViewCreateInfo vi{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-      vi.image = ctx.depth_images[i].image;
-      vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
-      vi.format = VK_FORMAT_D32_SFLOAT;
-      vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-      vi.subresourceRange.levelCount = 1;
-      vi.subresourceRange.layerCount = 1;
-      VK_CHECK(vkCreateImageView(device.device(), &vi, nullptr, &ctx.depth_views[i]));
-    }
   };
 
   { auto fb = window->framebuffer_size();
     create_swapchain_stack(static_cast<uint32_t>(fb.first), static_cast<uint32_t>(fb.second)); }
 
-  ctx.pipe = pipeline.get(); ctx.dset = dset; ctx.vbo = vbo.buffer; ctx.ibo = ibo.buffer;
+  ctx.pipe = pipeline.get(); ctx.dset = dset;
   VkExtent2D last = swapchain->extent();
   float total_time = 0.0f;
   using namespace std::chrono_literals;
@@ -554,12 +457,12 @@ int run() {
       std::this_thread::sleep_for(1ms);
       continue;
     }
-    ctx.view_proj = cam.view_projection(
+    glm::mat4 view_proj = cam.view_projection(
         static_cast<float>(want.width) / static_cast<float>(want.height),
         0.1f, 100.0f);
 
     CameraUBO ubo{};
-    ubo.inv_view_proj = glm::inverse(ctx.view_proj);
+    ubo.inv_view_proj = glm::inverse(view_proj);
     ubo.resolution = { static_cast<float>(ctx.voxel_img.width), static_cast<float>(ctx.voxel_img.height) };
     ubo.time = total_time;
     upload_buffer(allocator.raw(), device.device(), device.graphics_family(),
@@ -571,7 +474,7 @@ int run() {
       const_cast<VkImageView*>(swapchain->image_views().data()),
       swapchain->image_format(), swapchain->extent(),
       device.graphics_queue(), device.present_queue(),
-      &record_textured, &ctx);
+      &record_present, &ctx);
 
     std::this_thread::sleep_for(1ms);
   }
@@ -592,8 +495,6 @@ int run() {
   vkDestroySampler(device.device(), nearest_sampler, nullptr);
   vkDestroySampler(device.device(), linear_sampler, nullptr);
   destroy_buffer(allocator.raw(), cam_buf);
-  destroy_buffer(allocator.raw(), ibo);
-  destroy_buffer(allocator.raw(), vbo);
   destroy_transfer_context();
   allocator.destroy();
 
