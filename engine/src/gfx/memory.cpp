@@ -11,8 +11,10 @@
 
 namespace engine {
 
-TransferContext::TransferContext(VkDevice dev, uint32_t queue_family) {
+TransferContext::TransferContext(VkDevice dev, uint32_t queue_family,
+                                 VmaAllocator allocator) {
   device = dev;
+  allocator_ = allocator;
 
   VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
   pci.queueFamilyIndex = queue_family;
@@ -26,17 +28,92 @@ TransferContext::TransferContext(VkDevice dev, uint32_t queue_family) {
   ai.commandBufferCount = 1;
   VK_CHECK(vkAllocateCommandBuffers(device, &ai, &cmd));
 
-  VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-  VK_CHECK(vkCreateFence(device, &fi, nullptr, &fence));
+  // Create persistent staging buffer
+  VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  bi.size = kBufferSize;
+  bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  VmaAllocationCreateInfo aci{};
+  aci.usage = VMA_MEMORY_USAGE_AUTO;
+  aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+              VMA_ALLOCATION_CREATE_MAPPED_BIT;
+  VmaAllocationInfo info{};
+  VK_CHECK(vmaCreateBuffer(allocator_, &bi, &aci, &staging.buffer,
+                           &staging.allocation, &info));
+  staging.size = bi.size;
+  mapped_ = static_cast<uint8_t *>(info.pMappedData);
 }
 
 TransferContext::~TransferContext() {
+  // Wait for outstanding fences and destroy them.
+  for (auto &p : pending_) {
+    vkWaitForFences(device, 1, &p.fence, VK_TRUE, UINT64_MAX);
+    vkDestroyFence(device, p.fence, nullptr);
+  }
+  pending_.clear();
+
+  if (staging.buffer)
+    vmaDestroyBuffer(allocator_, staging.buffer, staging.allocation);
   if (cmd)
     vkFreeCommandBuffers(device, pool, 1, &cmd);
   if (pool)
     vkDestroyCommandPool(device, pool, nullptr);
-  if (fence)
-    vkDestroyFence(device, fence, nullptr);
+}
+
+void *TransferContext::allocate(size_t bytes, VkDeviceSize &offset) {
+  release_completed();
+
+  if (bytes > staging.size)
+    return nullptr;
+
+  while (true) {
+    if (head_ >= tail_) {
+      VkDeviceSize space_end = staging.size - head_;
+      if (space_end >= bytes) {
+        offset = head_;
+        head_ += bytes;
+        return mapped_ + offset;
+      } else if (tail_ > bytes) {
+        head_ = 0; // wrap
+      } else {
+        if (!pending_.empty()) {
+          vkWaitForFences(device, 1, &pending_.front().fence, VK_TRUE,
+                          UINT64_MAX);
+          release_completed();
+        } else {
+          return nullptr;
+        }
+      }
+    } else { // head_ < tail_
+      VkDeviceSize space = tail_ - head_;
+      if (space > bytes) {
+        offset = head_;
+        head_ += bytes;
+        return mapped_ + offset;
+      } else {
+        vkWaitForFences(device, 1, &pending_.front().fence, VK_TRUE,
+                        UINT64_MAX);
+        release_completed();
+      }
+    }
+  }
+}
+
+void TransferContext::mark_submitted(VkFence fence, VkDeviceSize offset,
+                                     VkDeviceSize size) {
+  pending_.push_back({fence, offset, offset + size});
+}
+
+void TransferContext::release_completed() {
+  while (!pending_.empty()) {
+    auto &p = pending_.front();
+    if (vkGetFenceStatus(device, p.fence) == VK_SUCCESS) {
+      tail_ = p.end % staging.size;
+      vkDestroyFence(device, p.fence, nullptr);
+      pending_.pop_front();
+    } else {
+      break;
+    }
+  }
 }
 
 // ---------- allocator ----------
@@ -110,26 +187,11 @@ void destroy_buffer(VmaAllocator alloc, Buffer &buf) {
 
 void upload_buffer(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
                    const Buffer &dst, const void *data, size_t bytes) {
-  // staging buffer
-  VkBuffer stagingBuf = VK_NULL_HANDLE;
-  VmaAllocation stagingAlloc = nullptr;
-  {
-    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bi.size = bytes;
-    bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  (void)alloc;
+  VkDeviceSize offset = 0;
+  void *ptr = ctx.allocate(bytes, offset);
+  std::memcpy(ptr, data, bytes);
 
-    VmaAllocationCreateInfo aci{};
-    aci.usage = VMA_MEMORY_USAGE_AUTO;
-    aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-                VMA_ALLOCATION_CREATE_MAPPED_BIT;
-
-    VmaAllocationInfo info{};
-    VK_CHECK(
-        vmaCreateBuffer(alloc, &bi, &aci, &stagingBuf, &stagingAlloc, &info));
-    std::memcpy(info.pMappedData, data, bytes);
-  }
-
-  // command buffer
   VK_CHECK(vkResetCommandPool(ctx.device, ctx.pool, 0));
 
   VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -137,19 +199,24 @@ void upload_buffer(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
   VK_CHECK(vkBeginCommandBuffer(ctx.cmd, &bi));
 
   VkBufferCopy region{};
+  region.srcOffset = offset;
   region.size = bytes;
-  vkCmdCopyBuffer(ctx.cmd, stagingBuf, dst.buffer, 1, &region);
+  vkCmdCopyBuffer(ctx.cmd, ctx.staging.buffer, dst.buffer, 1, &region);
 
   VK_CHECK(vkEndCommandBuffer(ctx.cmd));
 
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1;
   si.pCommandBuffers = &ctx.cmd;
-  VK_CHECK(vkResetFences(ctx.device, 1, &ctx.fence));
-  VK_CHECK(vkQueueSubmit(queue, 1, &si, ctx.fence));
-  VK_CHECK(vkWaitForFences(ctx.device, 1, &ctx.fence, VK_TRUE, UINT64_MAX));
 
-  vmaDestroyBuffer(alloc, stagingBuf, stagingAlloc);
+  VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+  VkFence fence = VK_NULL_HANDLE;
+  VK_CHECK(vkCreateFence(ctx.device, &fi, nullptr, &fence));
+  VK_CHECK(vkQueueSubmit(queue, 1, &si, fence));
+
+  ctx.mark_submitted(fence, offset, bytes);
+  vkWaitForFences(ctx.device, 1, &fence, VK_TRUE, UINT64_MAX);
+  ctx.release_completed();
 }
 
 // ---------- images ----------
@@ -375,21 +442,10 @@ void destroy_image3d(VmaAllocator alloc, Image3D &img) {
 
 void upload_image3d(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
                     const void *src, size_t src_bytes, const Image3D &dst) {
-  VkBuffer stagingBuf = VK_NULL_HANDLE;
-  VmaAllocation stagingAlloc = nullptr;
-  {
-    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bi.size = src_bytes;
-    bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    VmaAllocationCreateInfo aci{};
-    aci.usage = VMA_MEMORY_USAGE_AUTO;
-    aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-                VMA_ALLOCATION_CREATE_MAPPED_BIT;
-    VmaAllocationInfo info{};
-    VK_CHECK(
-        vmaCreateBuffer(alloc, &bi, &aci, &stagingBuf, &stagingAlloc, &info));
-    std::memcpy(info.pMappedData, src, src_bytes);
-  }
+  (void)alloc;
+  VkDeviceSize offset = 0;
+  void *ptr = ctx.allocate(src_bytes, offset);
+  std::memcpy(ptr, src, src_bytes);
 
   VK_CHECK(vkResetCommandPool(ctx.device, ctx.pool, 0));
 
@@ -416,12 +472,13 @@ void upload_image3d(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
   vkCmdPipelineBarrier2(ctx.cmd, &dep);
 
   VkBufferImageCopy region{};
+  region.bufferOffset = offset;
   region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
   region.imageSubresource.mipLevel = 0;
   region.imageSubresource.baseArrayLayer = 0;
   region.imageSubresource.layerCount = 1;
   region.imageExtent = {dst.width, dst.height, dst.depth};
-  vkCmdCopyBufferToImage(ctx.cmd, stagingBuf, dst.image,
+  vkCmdCopyBufferToImage(ctx.cmd, ctx.staging.buffer, dst.image,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
   VkImageMemoryBarrier2 to_read{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
@@ -446,11 +503,15 @@ void upload_image3d(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1;
   si.pCommandBuffers = &ctx.cmd;
-  VK_CHECK(vkResetFences(ctx.device, 1, &ctx.fence));
-  VK_CHECK(vkQueueSubmit(queue, 1, &si, ctx.fence));
-  VK_CHECK(vkWaitForFences(ctx.device, 1, &ctx.fence, VK_TRUE, UINT64_MAX));
 
-  vmaDestroyBuffer(alloc, stagingBuf, stagingAlloc);
+  VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+  VkFence fence = VK_NULL_HANDLE;
+  VK_CHECK(vkCreateFence(ctx.device, &fi, nullptr, &fence));
+  VK_CHECK(vkQueueSubmit(queue, 1, &si, fence));
+
+  ctx.mark_submitted(fence, offset, src_bytes);
+  vkWaitForFences(ctx.device, 1, &fence, VK_TRUE, UINT64_MAX);
+  ctx.release_completed();
 }
 
 } // namespace engine
