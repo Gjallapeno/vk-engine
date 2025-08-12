@@ -44,15 +44,14 @@ private:
 
   struct Frame {
     VkFence         in_flight = VK_NULL_HANDLE;
+    VkSemaphore     image_acquired = VK_NULL_HANDLE;
+    VkSemaphore     render_finished = VK_NULL_HANDLE;
     VkCommandPool   cmd_pool = VK_NULL_HANDLE;
     VkCommandBuffer cmd      = VK_NULL_HANDLE;
     bool            first_use = true;
   };
   std::vector<Frame> frames_;
   uint32_t frame_cursor_ = 0;
-
-  VkSemaphore timeline_ = VK_NULL_HANDLE;
-  uint64_t    timeline_value_ = 0;
 };
 
 } // namespace engine
