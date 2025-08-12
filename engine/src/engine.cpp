@@ -50,6 +50,10 @@ static std::filesystem::path exe_dir() {
 static constexpr uint32_t kStepsDown = 4;
 static constexpr float kRenderScale = 0.66f;
 
+static constexpr float kColorCompute[4]  = {0.0f, 0.6f, 1.0f, 1.0f};
+static constexpr float kColorGraphics[4] = {1.0f, 0.4f, 0.0f, 1.0f};
+static constexpr float kColorTransfer[4] = {0.4f, 1.0f, 0.4f, 1.0f};
+
 static float halton(uint32_t i, uint32_t b) {
   float f = 1.0f;
   float r = 0.0f;
@@ -157,6 +161,19 @@ static VkShaderModule load_module(VkDevice dev, const std::string &path) {
 static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
                            VkFormat, VkExtent2D extent, void *user) {
   auto *ctx = static_cast<DrawCtx *>(user);
+  auto begin_label = [&](const char* name, const float color[4]) {
+    if (!cfg::kGpuMarkers || !vkCmdBeginDebugUtilsLabelEXT) return;
+    VkDebugUtilsLabelEXT l{VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT};
+    l.pLabelName = name;
+    for (int i = 0; i < 4; ++i) l.color[i] = color[i];
+    vkCmdBeginDebugUtilsLabelEXT(cmd, &l);
+  };
+  auto end_label = [&]() {
+    if (cfg::kGpuMarkers && vkCmdEndDebugUtilsLabelEXT)
+      vkCmdEndDebugUtilsLabelEXT(cmd);
+  };
+
+  begin_label("Voxel generation", kColorCompute);
   VkImageMemoryBarrier pre[3]{{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER},
                               {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER},
                               {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}};
@@ -187,7 +204,9 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   uint32_t gy = (ctx->dispatch_dim.height + 7) / 8;
   uint32_t gz = (ctx->dispatch_dim.depth + 7) / 8;
   vkCmdDispatch(cmd, gx, gy, gz);
+  end_label();
 
+  begin_label("L1 build", kColorCompute);
   // Transition L0 outputs for sampling and prepare L1 for writing
   VkImageMemoryBarrier mid[3]{{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER},
                               {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER},
@@ -246,7 +265,9 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
                        nullptr, 3, post);
+  end_label();
 
+  begin_label("Geometry", kColorGraphics);
   VkImageMemoryBarrier steps_pre{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
   steps_pre.srcAccessMask = ctx->first_frame ? 0 : VK_ACCESS_TRANSFER_WRITE_BIT;
   steps_pre.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -338,7 +359,9 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
                           nullptr);
   vkCmdDraw(cmd, 3, 1, 0, 0);
   vkCmdEndRendering(cmd);
+  end_label();
 
+  begin_label("Readback", kColorTransfer);
   VkImageSubresourceRange stepsRange{};
   stepsRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
   stepsRange.levelCount = 1;
@@ -377,7 +400,9 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   VkClearColorValue zero{{0, 0, 0, 0}};
   vkCmdClearColorImage(cmd, ctx->steps_image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1,
                        &stepsRange);
+  end_label();
 
+  begin_label("Postprocess", kColorGraphics);
   // Transition G-buffer for sampling
   VkImageMemoryBarrier gpost[3]{{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER},
                                 {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER},
@@ -437,6 +462,7 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
                           nullptr);
   vkCmdDraw(cmd, 3, 1, 0, 0);
   vkCmdEndRendering(cmd);
+  end_label();
 
   ctx->first_frame = false;
 }
@@ -467,6 +493,7 @@ int run() {
   dci.surface = surface.vk();
   dci.enable_validation = cfg::kValidation;
   VulkanDevice device{dci};
+  load_debug_label_functions(instance.vk(), device.device());
 
   const auto shader_dir = exe_dir() / "shaders";
   const auto vs_path = (shader_dir / "vs_fullscreen.vert.spv").string();
@@ -653,7 +680,7 @@ int run() {
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     ai.descriptorPool = comp_pool.get();
     ai.descriptorSetCount = 1;
-    VkDescriptorSetLayout comp_dsl_handle = comp_dsl.get();
+    comp_dsl_handle = comp_dsl.get();
     ai.pSetLayouts = &comp_dsl_handle;
     VK_CHECK(vkAllocateDescriptorSets(device.device(), &ai, &comp_set));
 
@@ -748,7 +775,7 @@ int run() {
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     ai.descriptorPool = comp_l1_pool.get();
     ai.descriptorSetCount = 1;
-    VkDescriptorSetLayout comp_l1_dsl_handle = comp_l1_dsl.get();
+    comp_l1_dsl_handle = comp_l1_dsl.get();
     ai.pSetLayouts = &comp_l1_dsl_handle;
     VK_CHECK(vkAllocateDescriptorSets(device.device(), &ai, &comp_l1_set));
 

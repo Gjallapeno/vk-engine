@@ -7,6 +7,10 @@
 
 namespace engine {
 
+PFN_vkCmdBeginDebugUtilsLabelEXT  pfnCmdBeginDebugUtilsLabelEXT  = nullptr;
+PFN_vkCmdEndDebugUtilsLabelEXT    pfnCmdEndDebugUtilsLabelEXT    = nullptr;
+PFN_vkCmdInsertDebugUtilsLabelEXT pfnCmdInsertDebugUtilsLabelEXT = nullptr;
+
 static bool has_layer(const std::vector<VkLayerProperties>& layers, const char* name) {
   for (auto& l : layers) if (std::strcmp(l.layerName, name) == 0) return true;
   return false;
@@ -144,6 +148,30 @@ VKAPI_ATTR VkBool32 VKAPI_CALL VulkanInstance::debug_cb(
     spdlog::info("[vk][{}] <no data>", sev);
   }
   return VK_FALSE; // do not abort
+}
+
+void load_debug_label_functions(VkInstance instance, VkDevice device) {
+  pfnCmdBeginDebugUtilsLabelEXT =
+      reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(
+          vkGetInstanceProcAddr(instance, "vkCmdBeginDebugUtilsLabelEXT"));
+  pfnCmdEndDebugUtilsLabelEXT =
+      reinterpret_cast<PFN_vkCmdEndDebugUtilsLabelEXT>(
+          vkGetInstanceProcAddr(instance, "vkCmdEndDebugUtilsLabelEXT"));
+  pfnCmdInsertDebugUtilsLabelEXT =
+      reinterpret_cast<PFN_vkCmdInsertDebugUtilsLabelEXT>(
+          vkGetInstanceProcAddr(instance, "vkCmdInsertDebugUtilsLabelEXT"));
+
+  if (device) {
+    pfnCmdBeginDebugUtilsLabelEXT =
+        reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(
+            vkGetDeviceProcAddr(device, "vkCmdBeginDebugUtilsLabelEXT"));
+    pfnCmdEndDebugUtilsLabelEXT =
+        reinterpret_cast<PFN_vkCmdEndDebugUtilsLabelEXT>(
+            vkGetDeviceProcAddr(device, "vkCmdEndDebugUtilsLabelEXT"));
+    pfnCmdInsertDebugUtilsLabelEXT =
+        reinterpret_cast<PFN_vkCmdInsertDebugUtilsLabelEXT>(
+            vkGetDeviceProcAddr(device, "vkCmdInsertDebugUtilsLabelEXT"));
+  }
 }
 
 } // namespace engine
