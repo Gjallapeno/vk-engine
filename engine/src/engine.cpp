@@ -263,8 +263,9 @@ int run() {
   upload_buffer(allocator.raw(), device.device(), device.graphics_family(), device.graphics_queue(),
                 ibo, indices, sizeof(indices));
 
-  // Sampler for presenting the compute output
-  VkSampler sampler = VK_NULL_HANDLE;
+  // Samplers for sampled images
+  VkSampler linear_sampler  = VK_NULL_HANDLE;
+  VkSampler nearest_sampler = VK_NULL_HANDLE;
   {
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(device.physical(), &props);
@@ -272,10 +273,12 @@ int run() {
     vkGetPhysicalDeviceFeatures(device.physical(), &feats);
 
     VkSamplerCreateInfo si{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-    si.magFilter = VK_FILTER_LINEAR; si.minFilter = VK_FILTER_LINEAR;
-    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
     si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     si.minLod = 0.0f; si.maxLod = 0.0f;
+
+    // linear sampler for floating point images
+    si.magFilter = VK_FILTER_LINEAR; si.minFilter = VK_FILTER_LINEAR;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
     if (feats.samplerAnisotropy) {
       si.anisotropyEnable = VK_TRUE;
       si.maxAnisotropy = props.limits.maxSamplerAnisotropy;
@@ -283,7 +286,13 @@ int run() {
       si.anisotropyEnable = VK_FALSE;
       si.maxAnisotropy = 1.0f;
     }
-    VK_CHECK(vkCreateSampler(device.device(), &si, nullptr, &sampler));
+    VK_CHECK(vkCreateSampler(device.device(), &si, nullptr, &linear_sampler));
+
+    // nearest sampler for integer textures (e.g. occupancy grid)
+    si.magFilter = VK_FILTER_NEAREST; si.minFilter = VK_FILTER_NEAREST;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.anisotropyEnable = VK_FALSE; si.maxAnisotropy = 1.0f;
+    VK_CHECK(vkCreateSampler(device.device(), &si, nullptr, &nearest_sampler));
   }
 
   // Compute pipeline and resources
@@ -365,7 +374,7 @@ int run() {
     ovi.subresourceRange.layerCount = 1;
     VK_CHECK(vkCreateImageView(device.device(), &ovi, nullptr, &occ_view));
 
-    VkDescriptorImageInfo oi{}; oi.sampler = sampler; oi.imageView = occ_view;
+    VkDescriptorImageInfo oi{}; oi.sampler = nearest_sampler; oi.imageView = occ_view;
     oi.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkWriteDescriptorSet wocc{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
     wocc.dstSet = comp_dset; wocc.dstBinding = 2;
@@ -457,7 +466,7 @@ int run() {
     ai.descriptorSetCount = 1; ai.pSetLayouts = &layout;
     VK_CHECK(vkAllocateDescriptorSets(device.device(), &ai, &dset));
 
-    VkDescriptorImageInfo ii{}; ii.sampler = sampler; ii.imageView = ctx.voxel_view;
+    VkDescriptorImageInfo ii{}; ii.sampler = linear_sampler; ii.imageView = ctx.voxel_view;
     ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
     write.dstSet = dset; write.dstBinding = 0;
@@ -580,7 +589,8 @@ int run() {
   if (comp_dset_layout) vkDestroyDescriptorSetLayout(device.device(), comp_dset_layout, nullptr);
   if (occ_view) vkDestroyImageView(device.device(), occ_view, nullptr);
   destroy_image3d(allocator.raw(), occ_img);
-  vkDestroySampler(device.device(), sampler, nullptr);
+  vkDestroySampler(device.device(), nearest_sampler, nullptr);
+  vkDestroySampler(device.device(), linear_sampler, nullptr);
   destroy_buffer(allocator.raw(), cam_buf);
   destroy_buffer(allocator.raw(), ibo);
   destroy_buffer(allocator.raw(), vbo);
