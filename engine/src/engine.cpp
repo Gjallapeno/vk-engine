@@ -499,8 +499,9 @@ int run() {
 
   GpuAllocator allocator;
   allocator.init(instance.vk(), device.physical(), device.device());
-  TransferContext transfer{device.device(), device.graphics_family(),
-                           allocator.raw()};
+  {
+    TransferContext transfer{device.device(), device.graphics_family(),
+                             allocator.raw()};
 
   // Samplers for sampled images
   UniqueSampler linear_sampler;
@@ -1353,8 +1354,9 @@ int run() {
   destroy_buffer(allocator.raw(), cam_buf);
   destroy_buffer(allocator.raw(), vox_buf);
   destroy_buffer(allocator.raw(), vox_params_buf);
-  nearest_sampler.reset();
-  linear_sampler.reset();
+    nearest_sampler.reset();
+    linear_sampler.reset();
+  }
   allocator.destroy();
 
   spdlog::info("Shutdown.");
