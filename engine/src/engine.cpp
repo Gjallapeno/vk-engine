@@ -84,6 +84,10 @@ struct DrawCtx {
   VkImageView       steps_view  = VK_NULL_HANDLE;
   VkBuffer          steps_buffer = VK_NULL_HANDLE;
   VkExtent2D        steps_dim{0,0};
+  VkImage           shadow_steps_image = VK_NULL_HANDLE;
+  VkImageView       shadow_steps_view  = VK_NULL_HANDLE;
+  VkBuffer          shadow_steps_buffer = VK_NULL_HANDLE;
+  VkExtent2D        shadow_steps_dim{0,0};
   VkExtent2D        ray_extent{0,0};
   VkExtent3D        occ_dim{0,0,0};
   VkExtent3D        dispatch_dim{0,0,0};
@@ -311,6 +315,19 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   vkCmdClearColorImage(cmd, ctx->steps_image, VK_IMAGE_LAYOUT_GENERAL,
                        &zero, 1, &stepsRange);
 
+  VkImageMemoryBarrier shadow_steps_pre{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+  shadow_steps_pre.srcAccessMask = ctx->first_frame ? 0 : VK_ACCESS_TRANSFER_WRITE_BIT;
+  shadow_steps_pre.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  shadow_steps_pre.oldLayout = ctx->first_frame ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
+  shadow_steps_pre.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+  shadow_steps_pre.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  shadow_steps_pre.subresourceRange.levelCount = 1;
+  shadow_steps_pre.subresourceRange.layerCount = 1;
+  shadow_steps_pre.image = ctx->shadow_steps_image;
+  VkPipelineStageFlags shSrc = ctx->first_frame ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_TRANSFER_BIT;
+  vkCmdPipelineBarrier(cmd, shSrc, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                       0, 0, nullptr, 0, nullptr, 1, &shadow_steps_pre);
+
   // Transition G-buffer for sampling
   VkImageMemoryBarrier gpost[3]{ {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}, {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}, {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER} };
   for(int i=0;i<3;i++){
@@ -364,6 +381,41 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
                           0, 1, &ctx->light_dset, 0, nullptr);
   vkCmdDraw(cmd, 3, 1, 0, 0);
   vkCmdEndRendering(cmd);
+
+  VkImageSubresourceRange shRange{};
+  shRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  shRange.levelCount = 1;
+  shRange.layerCount = 1;
+
+  VkImageMemoryBarrier sh_to_copy{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+  sh_to_copy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  sh_to_copy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+  sh_to_copy.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+  sh_to_copy.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  sh_to_copy.subresourceRange = shRange;
+  sh_to_copy.image = ctx->shadow_steps_image;
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       0, 0, nullptr, 0, nullptr, 1, &sh_to_copy);
+
+  VkBufferImageCopy sh_bic{};
+  sh_bic.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  sh_bic.imageSubresource.layerCount = 1;
+  sh_bic.imageExtent = { ctx->shadow_steps_dim.width, ctx->shadow_steps_dim.height, 1 };
+  vkCmdCopyImageToBuffer(cmd, ctx->shadow_steps_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                         ctx->shadow_steps_buffer, 1, &sh_bic);
+
+  VkImageMemoryBarrier sh_to_clear{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+  sh_to_clear.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+  sh_to_clear.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  sh_to_clear.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  sh_to_clear.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+  sh_to_clear.subresourceRange = shRange;
+  sh_to_clear.image = ctx->shadow_steps_image;
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       0, 0, nullptr, 0, nullptr, 1, &sh_to_clear);
+  vkCmdClearColorImage(cmd, ctx->shadow_steps_image, VK_IMAGE_LAYOUT_GENERAL,
+                       &zero, 1, &shRange);
 
   ctx->first_frame = false;
 }
@@ -621,9 +673,9 @@ int run() {
   // Descriptor pool for geometry and lighting passes
   {
     VkDescriptorPoolSize sizes[3]{};
-    sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; sizes[0].descriptorCount = 3;
-    sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; sizes[1].descriptorCount = 6;
-    sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; sizes[2].descriptorCount = 1;
+    sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; sizes[0].descriptorCount = 4;
+    sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; sizes[1].descriptorCount = 8;
+    sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; sizes[2].descriptorCount = 2;
     VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     dpci.maxSets = 2; dpci.poolSizeCount = 3; dpci.pPoolSizes = sizes;
@@ -634,11 +686,14 @@ int run() {
   Image2D g_normal_img{};
   Image2D g_depth_img{};
   Image2D steps_img{};
+  Image2D shadow_steps_img{};
   VkImageView g_albedo_view = VK_NULL_HANDLE;
   VkImageView g_normal_view = VK_NULL_HANDLE;
   VkImageView g_depth_view = VK_NULL_HANDLE;
   VkImageView steps_view = VK_NULL_HANDLE;
+  VkImageView shadow_steps_view = VK_NULL_HANDLE;
   Buffer steps_buf{};
+  Buffer shadow_steps_buf{};
 
   auto destroy_swapchain_stack = [&]() {
     if (ray_dset) { vkFreeDescriptorSets(device.device(), dpool, 1, &ray_dset); ray_dset = VK_NULL_HANDLE; }
@@ -647,8 +702,10 @@ int run() {
     if (g_normal_view) vkDestroyImageView(device.device(), g_normal_view, nullptr);
     if (g_depth_view) vkDestroyImageView(device.device(), g_depth_view, nullptr);
     if (steps_view) vkDestroyImageView(device.device(), steps_view, nullptr);
+    if (shadow_steps_view) vkDestroyImageView(device.device(), shadow_steps_view, nullptr);
     destroy_image2d(allocator.raw(), g_albedo_img); destroy_image2d(allocator.raw(), g_normal_img); destroy_image2d(allocator.raw(), g_depth_img);
     destroy_image2d(allocator.raw(), steps_img); destroy_buffer(allocator.raw(), steps_buf);
+    destroy_image2d(allocator.raw(), shadow_steps_img); destroy_buffer(allocator.raw(), shadow_steps_buf);
     commands.reset();
     swapchain.reset();
   };
@@ -703,6 +760,15 @@ int run() {
     steps_buf = create_host_buffer(allocator.raw(), steps_w * steps_h * sizeof(uint32_t),
                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 
+    uint32_t shadow_steps_w = (sw + kStepsDown - 1) / kStepsDown;
+    uint32_t shadow_steps_h = (sh + kStepsDown - 1) / kStepsDown;
+    shadow_steps_img = create_image2d(allocator.raw(), shadow_steps_w, shadow_steps_h, VK_FORMAT_R32_UINT,
+                                      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    svi.image = shadow_steps_img.image; svi.format = VK_FORMAT_R32_UINT;
+    VK_CHECK(vkCreateImageView(device.device(), &svi, nullptr, &shadow_steps_view));
+    shadow_steps_buf = create_host_buffer(allocator.raw(), shadow_steps_w * shadow_steps_h * sizeof(uint32_t),
+                                          VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+
     VkDescriptorBufferInfo cam_bi{}; cam_bi.buffer = cam_buf.buffer; cam_bi.range = sizeof(CameraUBO);
     VkDescriptorBufferInfo vox_bi{}; vox_bi.buffer = vox_buf.buffer; vox_bi.range = sizeof(VoxelAABB);
     VkDescriptorImageInfo occ_info{}; occ_info.sampler = nearest_sampler; occ_info.imageView = occ_view; occ_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -739,19 +805,25 @@ int run() {
     VkDescriptorImageInfo albedo_info{}; albedo_info.sampler = linear_sampler; albedo_info.imageView = g_albedo_view; albedo_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkDescriptorImageInfo normal_info{}; normal_info.sampler = linear_sampler; normal_info.imageView = g_normal_view; normal_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkDescriptorImageInfo depth_info{}; depth_info.sampler = linear_sampler; depth_info.imageView = g_depth_view; depth_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorImageInfo shadow_steps_info{}; shadow_steps_info.imageView = shadow_steps_view; shadow_steps_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-    VkWriteDescriptorSet lwrites[4]{};
+    VkWriteDescriptorSet lwrites[8]{};
     lwrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; lwrites[0].dstSet = light_dset; lwrites[0].dstBinding = 0; lwrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; lwrites[0].descriptorCount = 1; lwrites[0].pBufferInfo = &cam_bi;
     lwrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; lwrites[1].dstSet = light_dset; lwrites[1].dstBinding = 1; lwrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; lwrites[1].descriptorCount = 1; lwrites[1].pImageInfo = &albedo_info;
     lwrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; lwrites[2].dstSet = light_dset; lwrites[2].dstBinding = 2; lwrites[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; lwrites[2].descriptorCount = 1; lwrites[2].pImageInfo = &normal_info;
     lwrites[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; lwrites[3].dstSet = light_dset; lwrites[3].dstBinding = 3; lwrites[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; lwrites[3].descriptorCount = 1; lwrites[3].pImageInfo = &depth_info;
-    vkUpdateDescriptorSets(device.device(), 4, lwrites, 0, nullptr);
+    lwrites[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; lwrites[4].dstSet = light_dset; lwrites[4].dstBinding = 4; lwrites[4].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; lwrites[4].descriptorCount = 1; lwrites[4].pBufferInfo = &vox_bi;
+    lwrites[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; lwrites[5].dstSet = light_dset; lwrites[5].dstBinding = 5; lwrites[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; lwrites[5].descriptorCount = 1; lwrites[5].pImageInfo = &occ_info;
+    lwrites[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; lwrites[6].dstSet = light_dset; lwrites[6].dstBinding = 6; lwrites[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; lwrites[6].descriptorCount = 1; lwrites[6].pImageInfo = &occ_l1_info;
+    lwrites[7].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; lwrites[7].dstSet = light_dset; lwrites[7].dstBinding = 7; lwrites[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; lwrites[7].descriptorCount = 1; lwrites[7].pImageInfo = &shadow_steps_info;
+    vkUpdateDescriptorSets(device.device(), 8, lwrites, 0, nullptr);
 
     ctx.ray_pipe = ray_pipeline.get(); ctx.ray_dset = ray_dset;
     ctx.light_pipe = present_pipeline.get(); ctx.light_dset = light_dset;
     ctx.g_albedo = g_albedo_img.image; ctx.g_normal = g_normal_img.image; ctx.g_depth = g_depth_img.image;
     ctx.g_albedo_view = g_albedo_view; ctx.g_normal_view = g_normal_view; ctx.g_depth_view = g_depth_view;
     ctx.steps_image = steps_img.image; ctx.steps_view = steps_view; ctx.steps_buffer = steps_buf.buffer; ctx.steps_dim = {steps_w, steps_h};
+    ctx.shadow_steps_image = shadow_steps_img.image; ctx.shadow_steps_view = shadow_steps_view; ctx.shadow_steps_buffer = shadow_steps_buf.buffer; ctx.shadow_steps_dim = {shadow_steps_w, shadow_steps_h};
     ctx.ray_extent = {rw, rh};
     ctx.first_frame = true;
   };
@@ -917,18 +989,31 @@ int run() {
       swapchain->image_format(), swapchain->extent(),
       device.graphics_queue(), device.present_queue(),
       &record_present, &ctx);
-    vkQueueWaitIdle(device.graphics_queue());
-    void* mapped = nullptr;
-    vmaMapMemory(allocator.raw(), steps_buf.allocation, &mapped);
-    uint32_t* stepData = static_cast<uint32_t*>(mapped);
-    uint64_t sum = 0; uint32_t maxv = 0;
-    uint32_t cells = ctx.steps_dim.width * ctx.steps_dim.height;
-    for(uint32_t i=0;i<cells;i++){ sum += stepData[i]; if(stepData[i] > maxv) maxv = stepData[i]; }
-    vmaUnmapMemory(allocator.raw(), steps_buf.allocation);
-    float avg_steps = static_cast<float>(sum) /
-                      (static_cast<float>(swapchain->extent().width) * static_cast<float>(swapchain->extent().height));
-    float max_steps = static_cast<float>(maxv) / static_cast<float>(kStepsDown * kStepsDown);
-    spdlog::info("avg_steps {:.2f} max_steps {:.2f}", avg_steps, max_steps);
+      vkQueueWaitIdle(device.graphics_queue());
+      void* mapped = nullptr;
+      vmaMapMemory(allocator.raw(), steps_buf.allocation, &mapped);
+      uint32_t* stepData = static_cast<uint32_t*>(mapped);
+      uint64_t sum = 0; uint32_t maxv = 0;
+      uint32_t cells = ctx.steps_dim.width * ctx.steps_dim.height;
+      for(uint32_t i=0;i<cells;i++){ sum += stepData[i]; if(stepData[i] > maxv) maxv = stepData[i]; }
+      vmaUnmapMemory(allocator.raw(), steps_buf.allocation);
+      float avg_steps = static_cast<float>(sum) /
+                        (static_cast<float>(swapchain->extent().width) * static_cast<float>(swapchain->extent().height));
+      float max_steps = static_cast<float>(maxv) / static_cast<float>(kStepsDown * kStepsDown);
+
+      void* mapped2 = nullptr;
+      vmaMapMemory(allocator.raw(), shadow_steps_buf.allocation, &mapped2);
+      uint32_t* shData = static_cast<uint32_t*>(mapped2);
+      uint64_t sh_sum = 0; uint32_t sh_max = 0;
+      uint32_t sh_cells = ctx.shadow_steps_dim.width * ctx.shadow_steps_dim.height;
+      for(uint32_t i=0;i<sh_cells;i++){ sh_sum += shData[i]; if(shData[i] > sh_max) sh_max = shData[i]; }
+      vmaUnmapMemory(allocator.raw(), shadow_steps_buf.allocation);
+      float avg_shadow_steps = static_cast<float>(sh_sum) /
+                               (static_cast<float>(swapchain->extent().width) * static_cast<float>(swapchain->extent().height));
+      float max_shadow_steps = static_cast<float>(sh_max) / static_cast<float>(kStepsDown * kStepsDown);
+
+      spdlog::info("avg_steps {:.2f} max_steps {:.2f}", avg_steps, max_steps);
+      spdlog::info("shadow_steps avg {:.2f} max {:.2f}", avg_shadow_steps, max_shadow_steps);
 
     std::this_thread::sleep_for(1ms);
   }
