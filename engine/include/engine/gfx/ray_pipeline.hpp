@@ -15,9 +15,9 @@ struct RayPipelineCreateInfo {
 // Descriptor set layout:
 //   set0,binding0 uniform buffer    (CameraUBO)
 //   set0,binding1 uniform buffer    (VoxelAABB)
-//   set0,binding2 combined sampler  (L0 occupancy texture)
-//   set0,binding3 combined sampler  (material texture)
-//   set0,binding4 combined sampler  (L1 occupancy texture)
+//   set0,binding2 storage buffer   (L0 occupancy bitfield)
+//   set0,binding3 storage buffer   (material bitfield)
+//   set0,binding4 combined sampler (L1 occupancy texture)
 //   set0,binding5 storage image    (step count image)
 class RayPipeline {
 public:
