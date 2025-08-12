@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <fstream>
 #include <cstdint>
+#include <cassert>
 
 namespace engine {
 
@@ -131,6 +132,8 @@ void VulkanDevice::create_logical(bool enable_validation) {
     vkGetPhysicalDeviceFeatures(phys_, &supported);
     if (supported.samplerAnisotropy)
       feats.samplerAnisotropy = VK_TRUE;
+    assert(supported.fragmentStoresAndAtomics == VK_TRUE);
+    feats.fragmentStoresAndAtomics = VK_TRUE;
   
     // Dynamic rendering feature
     VkPhysicalDeviceDynamicRenderingFeatures dyn{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES };
