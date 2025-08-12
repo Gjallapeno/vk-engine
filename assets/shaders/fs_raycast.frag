@@ -29,6 +29,19 @@ layout(set=0, binding=5, r32ui) uniform uimage2D stepsImg;
 
 const int STEPS_SCALE = 4;
 
+const vec3 N[6] = vec3[6](
+    vec3( 1,0,0), vec3(-1,0,0),
+    vec3( 0,1,0), vec3( 0,-1,0),
+    vec3( 0,0,1), vec3( 0,0,-1)
+);
+
+const vec3 ALBEDO[4] = vec3[4](
+    vec3(1.0),
+    vec3(0.55,0.27,0.07),
+    vec3(0.1,0.8,0.1),
+    vec3(0.5,0.5,0.5)
+);
+
 struct Ray { vec3 o; vec3 d; };
 
 Ray makeRay(vec2 p) {
@@ -41,9 +54,11 @@ Ray makeRay(vec2 p) {
 }
 
 // Fine DDA on the full-resolution voxel grid
-bool gridRaycastL0(Ray r, out ivec3 cell, out int hitFace, out float tHit, out int steps) {
+bool gridRaycastL0(Ray r, vec3 invD, out ivec3 cell, out int hitFace, out float tHit, out int steps) {
     steps = 0;
-    vec3 invD = 1.0 / r.d;
+    vec3 extent = vox.max - vox.min;
+    vec3 cellSize = extent / vec3(vox.dim);
+    vec3 invCell = 1.0 / cellSize;
     vec3 t0s = (vox.min - r.o) * invD;
     vec3 t1s = (vox.max - r.o) * invD;
     vec3 tsm = min(t0s, t1s);
@@ -54,33 +69,25 @@ bool gridRaycastL0(Ray r, out ivec3 cell, out int hitFace, out float tHit, out i
     float t = max(t0, 0.0);
     vec3 pos = r.o + t * r.d;
 
-    vec3 cellf = (pos - vox.min) / (vox.max - vox.min) * vec3(vox.dim);
+    vec3 cellf = (pos - vox.min) * invCell;
     cell = ivec3(clamp(floor(cellf), vec3(0.0), vec3(vox.dim) - vec3(1.0)));
 
     ivec3 step = ivec3(greaterThan(r.d, vec3(0.0))) * 2 - ivec3(1);
-    vec3 cellSize = (vox.max - vox.min) / vec3(vox.dim);
     vec3 next = vox.min + (vec3(cell) + (vec3(step)+1.0)*0.5) * cellSize;
-    vec3 tMax = (next - pos) / r.d;
-    vec3 tDelta = cellSize / abs(r.d);
+    vec3 tMax = (next - pos) * invD;
+    vec3 tDelta = cellSize * abs(invD);
     hitFace = -1;
-    for(int i=0;i<1024;i++){
+    int maxSteps = int(dot(vec3(vox.dim), vec3(1)));
+    for(int i=0;i<maxSteps;i++){
         if(any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, vox.dim))) break;
         steps++;
         if(texelFetch(uOccTex, cell, 0).r > 0u){ tHit = t; return true; }
-        if(tMax.x < tMax.y){
-            if(tMax.x < tMax.z){
-                cell.x += step.x; t = tMax.x; tMax.x += tDelta.x; hitFace = step.x > 0 ? 0 : 1;
-            }else{
-                cell.z += step.z; t = tMax.z; tMax.z += tDelta.z; hitFace = step.z > 0 ? 4 : 5;
-            }
-        }else{
-            if(tMax.y < tMax.z){
-                cell.y += step.y; t = tMax.y; tMax.y += tDelta.y; hitFace = step.y > 0 ? 2 : 3;
-            }else{
-                cell.z += step.z; t = tMax.z; tMax.z += tDelta.z; hitFace = step.z > 0 ? 4 : 5;
-            }
-        }
-        pos = r.o + t * r.d;
+        int a = (tMax.x < tMax.y) ? 0 : 1;
+        a = (tMax[a] < tMax.z) ? a : 2;
+        cell[a] += step[a];
+        t       = tMax[a];
+        tMax[a] += tDelta[a];
+        hitFace = (step[a] > 0) ? (a*2) : (a*2+1);
     }
     return false;
 }
@@ -102,36 +109,29 @@ bool gridRaycast(Ray r, out ivec3 cell, out int hitFace, out float tHit, out int
 
     ivec3 dim1 = vox.occL1Dim;
     vec3 cellSize = vox.occL1CellSize;
-    vec3 cellf = (pos - vox.min) / cellSize;
+    vec3 invCell = 1.0 / cellSize;
+    vec3 cellf = (pos - vox.min) * invCell;
     ivec3 cell1 = ivec3(clamp(floor(cellf), vec3(0.0), vec3(dim1) - vec3(1.0)));
     ivec3 step = ivec3(greaterThan(r.d, vec3(0.0))) * 2 - ivec3(1);
     vec3 next = vox.min + (vec3(cell1) + (vec3(step) + 1.0) * 0.5) * cellSize;
-    vec3 tMax = (next - pos) / r.d;
-    vec3 tDelta = cellSize / abs(r.d);
-    for(int i=0;i<1024;i++){
+    vec3 tMax = (next - pos) * invD;
+    vec3 tDelta = cellSize * abs(invD);
+    int maxSteps = int(dot(vec3(dim1), vec3(1)));
+    for(int i=0;i<maxSteps;i++){
         if(any(lessThan(cell1, ivec3(0))) || any(greaterThanEqual(cell1, dim1))) break;
         if(texelFetch(uOccTexL1, cell1, 0).r > 0u){
-            Ray r2; r2.o = pos; r2.d = r.d;
+            Ray r2; r2.o = r.o + t * r.d; r2.d = r.d;
             float tLocal; int s0;
-            bool hit = gridRaycastL0(r2, cell, hitFace, tLocal, s0);
+            bool hit = gridRaycastL0(r2, invD, cell, hitFace, tLocal, s0);
             stepsL0 += s0;
             if(hit){ tHit = t + tLocal; return true; } else return false;
         }
         stepsL1++;
-        if(tMax.x < tMax.y){
-            if(tMax.x < tMax.z){
-                cell1.x += step.x; t = tMax.x; tMax.x += tDelta.x;
-            }else{
-                cell1.z += step.z; t = tMax.z; tMax.z += tDelta.z;
-            }
-        }else{
-            if(tMax.y < tMax.z){
-                cell1.y += step.y; t = tMax.y; tMax.y += tDelta.y;
-            }else{
-                cell1.z += step.z; t = tMax.z; tMax.z += tDelta.z;
-            }
-        }
-        pos = r.o + t * r.d;
+        int a = (tMax.x < tMax.y) ? 0 : 1;
+        a = (tMax[a] < tMax.z) ? a : 2;
+        cell1[a] += step[a];
+        t       = tMax[a];
+        tMax[a] += tDelta[a];
     }
     return false;
 }
@@ -144,16 +144,8 @@ void main() {
     float depth = 0.0;
     if (gridRaycast(r, cell, face, t, steps1, steps0)) {
         uint m = texelFetch(uMatTex, cell, 0).r;
-        if(m == 1u)      albedo = vec3(0.55,0.27,0.07); // terrain
-        else if(m == 2u) albedo = vec3(0.1,0.8,0.1);    // foliage
-        else if(m == 3u) albedo = vec3(0.5,0.5,0.5);    // rock
-        else             albedo = vec3(1.0);
-        if(face == 0)      normal = vec3(1,0,0);
-        else if(face == 1) normal = vec3(-1,0,0);
-        else if(face == 2) normal = vec3(0,1,0);
-        else if(face == 3) normal = vec3(0,-1,0);
-        else if(face == 4) normal = vec3(0,0,1);
-        else if(face == 5) normal = vec3(0,0,-1);
+        albedo = ALBEDO[m <= 3u ? int(m) : 0];
+        normal = (face >= 0) ? N[face] : vec3(0);
         depth = t;
     }
     int totalSteps = steps0 + steps1;
