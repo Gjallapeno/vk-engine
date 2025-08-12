@@ -174,6 +174,17 @@ int run() {
   VkDescriptorPool dpool = VK_NULL_HANDLE;
   VkDescriptorSet  dset  = VK_NULL_HANDLE;
 
+  // Descriptor pool is created once at startup so that descriptor sets can
+  // be freed and re-allocated without recreating the pool on swapchain
+  // recreation.
+  {
+    VkDescriptorPoolSize sizes{}; sizes.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; sizes.descriptorCount = 1;
+    VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &sizes;
+    VK_CHECK(vkCreateDescriptorPool(device.device(), &dpci, nullptr, &dpool));
+  }
+
   auto create_swapchain_stack = [&](uint32_t sw, uint32_t sh)
   {
     VulkanSwapchainCreateInfo sci{};
@@ -195,11 +206,10 @@ int run() {
       pipeline = std::make_unique<TrianglePipeline>(pci);
     }
 
-    if (dpool) { vkDestroyDescriptorPool(device.device(), dpool, nullptr); dpool = VK_NULL_HANDLE; }
-    VkDescriptorPoolSize sizes{}; sizes.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; sizes.descriptorCount = 1;
-    VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-    dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &sizes;
-    VK_CHECK(vkCreateDescriptorPool(device.device(), &dpci, nullptr, &dpool));
+    if (dset) {
+      vkFreeDescriptorSets(device.device(), dpool, 1, &dset);
+      dset = VK_NULL_HANDLE;
+    }
 
     VkDescriptorSetAllocateInfo ai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
     ai.descriptorPool = dpool;
@@ -254,6 +264,7 @@ int run() {
   vkDeviceWaitIdle(device.device());
 
   commands.reset(); swapchain.reset(); pipeline.reset();
+  if (dset) vkFreeDescriptorSets(device.device(), dpool, 1, &dset);
   if (dpool) vkDestroyDescriptorPool(device.device(), dpool, nullptr);
   vkDestroySampler(device.device(), sampler, nullptr);
   vkDestroyImageView(device.device(), view, nullptr);
