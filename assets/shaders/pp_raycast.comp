@@ -1,0 +1,17 @@
+#version 460
+layout (local_size_x=8, local_size_y=8) in;
+layout (rgba16f, binding=0) writeonly uniform image2D outImg;
+
+layout (std140, binding=1) uniform Camera {
+    mat4 invViewProj;
+    vec2 resolution;
+    float time;
+} cam;
+
+void main(){
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, ivec2(cam.resolution)))) return;
+    bool c = ((((p.x >> 4) ^ (p.y >> 4)) & 1) == 1);
+    vec3 col = c ? vec3(0.95,0.94,0.78) : vec3(0.44,0.52,0.98);
+    imageStore(outImg, p, vec4(col,1));
+}
