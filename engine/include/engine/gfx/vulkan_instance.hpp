@@ -38,4 +38,16 @@ private:
   PFN_vkDestroyDebugUtilsMessengerEXT pfnDestroyDbg_ = nullptr;
 };
 
+// Debug label helpers
+extern PFN_vkCmdBeginDebugUtilsLabelEXT  pfnCmdBeginDebugUtilsLabelEXT;
+extern PFN_vkCmdEndDebugUtilsLabelEXT    pfnCmdEndDebugUtilsLabelEXT;
+extern PFN_vkCmdInsertDebugUtilsLabelEXT pfnCmdInsertDebugUtilsLabelEXT;
+
+// Load debug utils label commands after instance/device creation
+void load_debug_label_functions(VkInstance instance, VkDevice device);
+
 } // namespace engine
+
+#define vkCmdBeginDebugUtilsLabelEXT  engine::pfnCmdBeginDebugUtilsLabelEXT
+#define vkCmdEndDebugUtilsLabelEXT    engine::pfnCmdEndDebugUtilsLabelEXT
+#define vkCmdInsertDebugUtilsLabelEXT engine::pfnCmdInsertDebugUtilsLabelEXT
