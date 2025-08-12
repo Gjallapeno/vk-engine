@@ -28,8 +28,8 @@ VkShaderModule PresentPipeline::load_module(const std::string& path) {
 
 PresentPipeline::PresentPipeline(const PresentPipelineCreateInfo& ci)
   : dev_(ci.device), color_format_(ci.color_format) {
-  // Descriptor set layout for camera UBO, voxel AABB UBO and occupancy texture
-  VkDescriptorSetLayoutBinding binds[3]{};
+  // Descriptor set layout for camera UBO, voxel AABB UBO and voxel textures
+  VkDescriptorSetLayoutBinding binds[4]{};
   binds[0].binding = 0;
   binds[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
   binds[0].descriptorCount = 1;
@@ -45,8 +45,13 @@ PresentPipeline::PresentPipeline(const PresentPipelineCreateInfo& ci)
   binds[2].descriptorCount = 1;
   binds[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
+  binds[3].binding = 3;
+  binds[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  binds[3].descriptorCount = 1;
+  binds[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
   VkDescriptorSetLayoutCreateInfo dlci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-  dlci.bindingCount = 3; dlci.pBindings = binds;
+  dlci.bindingCount = 4; dlci.pBindings = binds;
   VK_CHECK(vkCreateDescriptorSetLayout(dev_, &dlci, nullptr, &dset_layout_));
 
   // Pipeline layout: only descriptor set layout (no push constants)
