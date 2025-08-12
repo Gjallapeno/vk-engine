@@ -43,8 +43,6 @@ private:
   uint32_t  gfx_family_ = ~0u;
 
   struct Frame {
-    VkSemaphore     image_available = VK_NULL_HANDLE;
-    VkSemaphore     render_finished = VK_NULL_HANDLE;
     VkFence         in_flight = VK_NULL_HANDLE;
     VkCommandPool   cmd_pool = VK_NULL_HANDLE;
     VkCommandBuffer cmd      = VK_NULL_HANDLE;
@@ -52,6 +50,9 @@ private:
   };
   std::vector<Frame> frames_;
   uint32_t frame_cursor_ = 0;
+
+  VkSemaphore timeline_ = VK_NULL_HANDLE;
+  uint64_t    timeline_value_ = 0;
 };
 
 } // namespace engine
