@@ -1,6 +1,8 @@
-﻿#include <engine/engine.hpp>
+﻿// [UNCHANGED includes...]
+#include <engine/engine.hpp>
 #include <engine/log.hpp>
 #include <engine/config.hpp>
+#include <engine/vk_checks.hpp>
 #include <engine/platform/window.hpp>
 #include <engine/gfx/vulkan_instance.hpp>
 #include <engine/gfx/vulkan_surface.hpp>
@@ -8,11 +10,14 @@
 #include <engine/gfx/vulkan_swapchain.hpp>
 #include <engine/gfx/vulkan_commands.hpp>
 #include <engine/gfx/vulkan_pipeline.hpp>
+#include <engine/gfx/memory.hpp>
 
 #include <spdlog/spdlog.h>
 #include <thread>
 #include <chrono>
 #include <filesystem>
+#include <memory>
+#include <vector>
 
 #ifdef _WIN32
   #include <windows.h>
@@ -20,7 +25,6 @@
 
 namespace engine {
 
-// ---- helpers ----
 static std::filesystem::path exe_dir() {
 #ifdef _WIN32
   char buf[MAX_PATH]{};
@@ -31,10 +35,16 @@ static std::filesystem::path exe_dir() {
 #endif
 }
 
-struct DrawCtx { TrianglePipeline* pipe; };
+struct DrawCtx {
+  TrianglePipeline* pipe = nullptr;
+  VkDescriptorSet   dset = VK_NULL_HANDLE;
+  VkBuffer          vbo  = VK_NULL_HANDLE;
+  VkBuffer          ibo  = VK_NULL_HANDLE;
+  VkIndexType       index_type = VK_INDEX_TYPE_UINT16;
+};
 
-// Record one triangle via dynamic rendering (viewport Y-flip)
-static void record_triangle(VkCommandBuffer cmd, VkImage /*img*/, VkImageView view, VkFormat /*fmt*/, VkExtent2D extent, void* user) {
+static void record_textured(VkCommandBuffer cmd, VkImage, VkImageView view,
+                            VkFormat, VkExtent2D extent, void* user) {
   auto* ctx = static_cast<DrawCtx*>(user);
 
   VkRenderingAttachmentInfo color{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
@@ -42,7 +52,7 @@ static void record_triangle(VkCommandBuffer cmd, VkImage /*img*/, VkImageView vi
   color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
   color.loadOp  = VK_ATTACHMENT_LOAD_OP_CLEAR;
   color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-  VkClearValue clear; clear.color = { {0.05f, 0.05f, 0.08f, 1.0f} };
+  VkClearValue clear; clear.color = { {0.06f, 0.07f, 0.10f, 1.0f} };
   color.clearValue = clear;
 
   VkRenderingInfo ri{ VK_STRUCTURE_TYPE_RENDERING_INFO };
@@ -54,12 +64,12 @@ static void record_triangle(VkCommandBuffer cmd, VkImage /*img*/, VkImageView vi
 
   vkCmdBeginRendering(cmd, &ri);
 
-  // Flip Y so “up” is up on screen (Vulkan’s NDC is inverted vs GL)
+  // STANDARD viewport (positive height; no winding flip)
   VkViewport vp{};
   vp.x = 0.0f;
-  vp.y = static_cast<float>(extent.height);
+  vp.y = 0.0f;
   vp.width  = static_cast<float>(extent.width);
-  vp.height = -static_cast<float>(extent.height); // negative height = Y flip
+  vp.height = static_cast<float>(extent.height);
   vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
   vkCmdSetViewport(cmd, 0, 1, &vp);
 
@@ -71,7 +81,15 @@ static void record_triangle(VkCommandBuffer cmd, VkImage /*img*/, VkImageView vi
   float aspect = extent.width / (extent.height > 0 ? float(extent.height) : 1.0f);
   vkCmdPushConstants(cmd, ctx->pipe->layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float), &aspect);
 
-  vkCmdDraw(cmd, 3, 1, 0, 0);
+  VkBuffer vbos[] = { ctx->vbo };
+  VkDeviceSize offs[] = { 0 };
+  vkCmdBindVertexBuffers(cmd, 0, 1, vbos, offs);
+  vkCmdBindIndexBuffer(cmd, ctx->ibo, 0, ctx->index_type);
+
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipe->layout(),
+                          0, 1, &ctx->dset, 0, nullptr);
+
+  vkCmdDrawIndexed(cmd, 6, 1, 0, 0, 0);
   vkCmdEndRendering(cmd);
 }
 
@@ -79,79 +97,167 @@ int run() {
   init_logging();
   log_boot_banner("engine");
 
-  // Window
-  WindowDesc wdesc{};
-  wdesc.title = "vk_engine Step 8 (triangle)";
+  WindowDesc wdesc{}; wdesc.title = "vk_engine Step 11 (textured quad)";
   auto window = create_window(wdesc);
-  auto fb = window->framebuffer_size();
 
-  // Instance (+validation)
-  VulkanInstanceCreateInfo ici{};
-  ici.enable_validation = cfg::kValidation;
+  VulkanInstanceCreateInfo ici{}; ici.enable_validation = cfg::kValidation;
   for (auto* e : platform_required_instance_extensions()) ici.extra_extensions.push_back(e);
   VulkanInstance instance{ici};
-
-  // Surface
   VulkanSurface surface{instance.vk(), window->native_handle()};
-
-  // Device
-  VulkanDeviceCreateInfo dci{};
-  dci.instance = instance.vk();
-  dci.surface = surface.vk();
-  dci.enable_validation = cfg::kValidation;
+  VulkanDeviceCreateInfo dci{}; dci.instance = instance.vk(); dci.surface = surface.vk(); dci.enable_validation = cfg::kValidation;
   VulkanDevice device{dci};
 
-  // Swapchain
-  VulkanSwapchainCreateInfo sci{};
-  sci.physical = device.physical();
-  sci.device   = device.device();
-  sci.surface  = surface.vk();
-  sci.desired_width  = static_cast<uint32_t>(fb.first);
-  sci.desired_height = static_cast<uint32_t>(fb.second);
-  VulkanSwapchain swapchain{sci};
-
-  // Absolute shader paths next to the exe
   const auto shader_dir = exe_dir() / "shaders";
-  const auto vs_path = (shader_dir / "tri.vert.spv").string();
-  const auto fs_path = (shader_dir / "tri.frag.spv").string();
+  const auto vs_path = (shader_dir / "tex.vert.spv").string();
+  const auto fs_path = (shader_dir / "tex.frag.spv").string();
   spdlog::info("[vk] Using shaders: {}", shader_dir.string());
 
-  // Pipeline
-  TrianglePipelineCreateInfo pci{};
-  pci.device = device.device();
-  pci.color_format = swapchain.image_format();
-  pci.vs_spv = vs_path;
-  pci.fs_spv = fs_path;
-  TrianglePipeline pipeline{pci};
+  GpuAllocator allocator; allocator.init(instance.vk(), device.physical(), device.device());
 
-  // Commands
-  VulkanCommandsCreateInfo cci{};
-  cci.device = device.device();
-  cci.graphics_family = device.graphics_family();
-  cci.image_count = static_cast<uint32_t>(swapchain.image_views().size());
-  VulkanCommands commands{cci};
+  // Rectangle geometry (CCW order)
+  const float verts[] = {
+    //   x,     y,     u,   v
+    -0.9f, -0.6f,  0.0f, 1.0f,  // 0: bottom-left
+     0.9f, -0.6f,  1.0f, 1.0f,  // 1: bottom-right
+     0.9f,  0.6f,  1.0f, 0.0f,  // 2: top-right
+    -0.9f,  0.6f,  0.0f, 0.0f   // 3: top-left
+  };
+  const uint16_t indices[] = { 0, 1, 2, 2, 3, 0 };
 
-  DrawCtx ctx{ &pipeline };
+  Buffer vbo = create_buffer(allocator.raw(), sizeof(verts), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+  upload_buffer(allocator.raw(), vbo, verts, sizeof(verts));
+  Buffer ibo = create_buffer(allocator.raw(), sizeof(indices), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+  upload_buffer(allocator.raw(), ibo, indices, sizeof(indices));
 
+  // Checkerboard
+  const uint32_t TEX_W = 512, TEX_H = 512;
+  std::vector<uint32_t> pixels(TEX_W * TEX_H);
+  for (uint32_t y=0; y<TEX_H; ++y) {
+    for (uint32_t x=0; x<TEX_W; ++x) {
+      bool c = ((x/32) ^ (y/32)) & 1;
+      uint8_t r = c ? 255 : 40, g = c ? 220 : 60, b = c ? 120 : 200;
+      pixels[y*TEX_W + x] = (255u<<24) | (uint32_t(b)<<16) | (uint32_t(g)<<8) | uint32_t(r);
+    }
+  }
+
+  Image2D img = create_image2d(allocator.raw(), TEX_W, TEX_H, VK_FORMAT_R8G8B8A8_UNORM,
+                               VK_IMAGE_USAGE_SAMPLED_BIT);
+  upload_image2d(allocator.raw(), device.device(), device.graphics_family(), device.graphics_queue(),
+                 pixels.data(), pixels.size()*sizeof(uint32_t), img);
+
+  // View + Sampler
+  VkImageView view = VK_NULL_HANDLE;
+  {
+    VkImageViewCreateInfo vi{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    vi.image = img.image; vi.viewType = VK_IMAGE_VIEW_TYPE_2D; vi.format = VK_FORMAT_R8G8B8A8_UNORM;
+    vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    vi.subresourceRange.levelCount = 1; vi.subresourceRange.layerCount = 1;
+    VK_CHECK(vkCreateImageView(device.device(), &vi, nullptr, &view));
+  }
+  VkSampler sampler = VK_NULL_HANDLE;
+  {
+    VkSamplerCreateInfo si{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    si.magFilter = VK_FILTER_LINEAR; si.minFilter = VK_FILTER_LINEAR;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    si.maxAnisotropy = 1.0f;
+    VK_CHECK(vkCreateSampler(device.device(), &si, nullptr, &sampler));
+  }
+
+  std::unique_ptr<VulkanSwapchain>   swapchain;
+  std::unique_ptr<VulkanCommands>    commands;
+  std::unique_ptr<TrianglePipeline>  pipeline;
+
+  VkDescriptorPool dpool = VK_NULL_HANDLE;
+  VkDescriptorSet  dset  = VK_NULL_HANDLE;
+
+  auto create_swapchain_stack = [&](uint32_t sw, uint32_t sh)
+  {
+    VulkanSwapchainCreateInfo sci{};
+    sci.physical = device.physical(); sci.device = device.device(); sci.surface = surface.vk();
+    sci.desired_width = sw; sci.desired_height = sh;
+    swapchain = std::make_unique<VulkanSwapchain>(sci);
+
+    VulkanCommandsCreateInfo cci{};
+    cci.device = device.device(); cci.graphics_family = device.graphics_family();
+    cci.image_count = static_cast<uint32_t>(swapchain->image_views().size());
+    commands = std::make_unique<VulkanCommands>(cci);
+
+    if (!pipeline || pipeline->color_format() != swapchain->image_format()) {
+      TrianglePipelineCreateInfo pci{};
+      pci.device = device.device();
+      pci.color_format = swapchain->image_format();
+      pci.vs_spv = vs_path; pci.fs_spv = fs_path;
+      pipeline = std::make_unique<TrianglePipeline>(pci);
+    }
+
+    if (dpool) { vkDestroyDescriptorPool(device.device(), dpool, nullptr); dpool = VK_NULL_HANDLE; }
+    VkDescriptorPoolSize sizes{}; sizes.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; sizes.descriptorCount = 1;
+    VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &sizes;
+    VK_CHECK(vkCreateDescriptorPool(device.device(), &dpci, nullptr, &dpool));
+
+    VkDescriptorSetAllocateInfo ai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    ai.descriptorPool = dpool;
+    VkDescriptorSetLayout layout = pipeline->dset_layout();
+    ai.descriptorSetCount = 1; ai.pSetLayouts = &layout;
+    VK_CHECK(vkAllocateDescriptorSets(device.device(), &ai, &dset));
+
+    VkDescriptorImageInfo ii{}; ii.sampler = sampler; ii.imageView = view;
+    ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    write.dstSet = dset; write.dstBinding = 0;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; write.descriptorCount = 1;
+    write.pImageInfo = &ii;
+    vkUpdateDescriptorSets(device.device(), 1, &write, 0, nullptr);
+  };
+
+  { auto fb = window->framebuffer_size();
+    create_swapchain_stack(static_cast<uint32_t>(fb.first), static_cast<uint32_t>(fb.second)); }
+
+  DrawCtx ctx{}; ctx.pipe = pipeline.get(); ctx.dset = dset; ctx.vbo = vbo.buffer; ctx.ibo = ibo.buffer;
+  VkExtent2D last = swapchain->extent();
   using namespace std::chrono_literals;
+
   while (!window->should_close()) {
     window->poll_events();
 
-    commands.acquire_record_present(
-      swapchain.vk(),
-      const_cast<VkImage*>(swapchain.images().data()),
-      const_cast<VkImageView*>(swapchain.image_views().data()),
-      swapchain.image_format(),
-      swapchain.extent(),
-      device.graphics_queue(),
-      device.present_queue(),
-      &record_triangle,
-      &ctx);
+    auto fb = window->framebuffer_size();
+    VkExtent2D want{ static_cast<uint32_t>(fb.first), static_cast<uint32_t>(fb.second) };
+    if (want.width == 0 || want.height == 0) { std::this_thread::sleep_for(10ms); continue; }
+
+    if (want.width != last.width || want.height != last.height) {
+      vkDeviceWaitIdle(device.device());
+      commands.reset(); swapchain.reset();
+      create_swapchain_stack(want.width, want.height);
+      ctx.pipe = pipeline.get(); ctx.dset = dset;
+      last = swapchain->extent();
+      std::this_thread::sleep_for(1ms);
+      continue;
+    }
+
+    commands->acquire_record_present(
+      swapchain->vk(),
+      const_cast<VkImage*>(swapchain->images().data()),
+      const_cast<VkImageView*>(swapchain->image_views().data()),
+      swapchain->image_format(), swapchain->extent(),
+      device.graphics_queue(), device.present_queue(),
+      &record_textured, &ctx);
 
     std::this_thread::sleep_for(1ms);
   }
 
   vkDeviceWaitIdle(device.device());
+
+  commands.reset(); swapchain.reset(); pipeline.reset();
+  if (dpool) vkDestroyDescriptorPool(device.device(), dpool, nullptr);
+  vkDestroySampler(device.device(), sampler, nullptr);
+  vkDestroyImageView(device.device(), view, nullptr);
+  destroy_image2d(allocator.raw(), img);
+  destroy_buffer(allocator.raw(), ibo);
+  destroy_buffer(allocator.raw(), vbo);
+  allocator.destroy();
+
   spdlog::info("Shutdown.");
   return 0;
 }

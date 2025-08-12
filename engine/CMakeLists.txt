@@ -8,6 +8,7 @@
   src/gfx/vulkan_swapchain.cpp
   src/gfx/vulkan_commands.cpp
   src/gfx/vulkan_pipeline.cpp
+  src/gfx/memory.cpp  # empty TU, utilities are header-only
   src/platform/glfw_window.cpp
 )
 
@@ -36,8 +37,13 @@ target_compile_definitions(engine PRIVATE
   $<$<NOT:$<CONFIG:Debug>>:SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_INFO>
 )
 
+# --- Dependencies
+# Vulkan was already found in the root CMakeLists
+find_package(VulkanMemoryAllocator CONFIG REQUIRED)  # from vcpkg
+
 target_link_libraries(engine PRIVATE
   Vulkan::Vulkan
+  GPUOpen::VulkanMemoryAllocator
   glfw
   spdlog::spdlog
 )

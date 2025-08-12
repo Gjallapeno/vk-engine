@@ -9,7 +9,7 @@ namespace engine {
 static std::vector<char> read_binary(const std::string& path) {
   std::ifstream f(path, std::ios::ate | std::ios::binary);
   if (!f) { spdlog::error("[vk] Failed to open SPIR-V: {}", path); std::abort(); }
-  size_t size = (size_t)f.tellg();
+  size_t size = static_cast<size_t>(f.tellg());
   std::vector<char> data(size);
   f.seekg(0);
   f.read(data.data(), size);
@@ -27,19 +27,33 @@ VkShaderModule TrianglePipeline::load_module(const std::string& path) {
 }
 
 TrianglePipeline::TrianglePipeline(const TrianglePipelineCreateInfo& ci)
-  : dev_(ci.device)
+  : dev_(ci.device), color_format_(ci.color_format)
 {
-  // Push constants: 1 float (aspect)
+  // Descriptor set layout: set0, binding0 = combined image sampler (fragment)
+  VkDescriptorSetLayoutBinding sam{};
+  sam.binding = 0;
+  sam.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  sam.descriptorCount = 1;
+  sam.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+  VkDescriptorSetLayoutCreateInfo dlci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+  dlci.bindingCount = 1;
+  dlci.pBindings = &sam;
+  VK_CHECK(vkCreateDescriptorSetLayout(dev_, &dlci, nullptr, &dset_layout_));
+
+  // Pipeline layout: push constant (float aspect) + set layout
   VkPushConstantRange pcr{};
   pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-  pcr.offset = 0;
-  pcr.size = sizeof(float);
+  pcr.offset = 0; pcr.size = sizeof(float);
 
   VkPipelineLayoutCreateInfo lci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+  lci.setLayoutCount = 1;
+  lci.pSetLayouts = &dset_layout_;
   lci.pushConstantRangeCount = 1;
   lci.pPushConstantRanges = &pcr;
   VK_CHECK(vkCreatePipelineLayout(dev_, &lci, nullptr, &layout_));
 
+  // Shaders
   VkShaderModule vs = load_module(ci.vs_spv);
   VkShaderModule fs = load_module(ci.fs_spv);
 
@@ -53,45 +67,57 @@ TrianglePipeline::TrianglePipeline(const TrianglePipelineCreateInfo& ci)
   stages[1].module = fs;
   stages[1].pName  = "main";
 
+  // Vertex: binding0 -> vec2 pos, vec2 uv
+  VkVertexInputBindingDescription bind{};
+  bind.binding = 0; bind.stride = sizeof(float) * 4;
+  bind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+  VkVertexInputAttributeDescription attrs[2]{};
+  attrs[0].location = 0; attrs[0].binding = 0;
+  attrs[0].format = VK_FORMAT_R32G32_SFLOAT; attrs[0].offset = 0;
+  attrs[1].location = 1; attrs[1].binding = 0;
+  attrs[1].format = VK_FORMAT_R32G32_SFLOAT; attrs[1].offset = sizeof(float) * 2;
+
   VkPipelineVertexInputStateCreateInfo vin{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+  vin.vertexBindingDescriptionCount = 1;
+  vin.pVertexBindingDescriptions = &bind;
+  vin.vertexAttributeDescriptionCount = 2;
+  vin.pVertexAttributeDescriptions = attrs;
+
   VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
   ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 
   VkPipelineViewportStateCreateInfo vp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
-  vp.viewportCount = 1;
-  vp.scissorCount  = 1;
+  vp.viewportCount = 1; vp.scissorCount = 1;
 
   VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
-  rs.depthClampEnable = VK_FALSE;
-  rs.rasterizerDiscardEnable = VK_FALSE;
   rs.polygonMode = VK_POLYGON_MODE_FILL;
-  rs.cullMode = VK_CULL_MODE_NONE;                   // <- disable culling to avoid winding surprises
-  rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;    // still set a sensible front face
+  rs.cullMode = VK_CULL_MODE_NONE;                  // <— disable culling to avoid winding/flip issues
+  rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;   // standard
   rs.lineWidth = 1.0f;
 
   VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
   ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
   VkPipelineColorBlendAttachmentState cbAtt{};
-  cbAtt.colorWriteMask = VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT|VK_COLOR_COMPONENT_B_BIT|VK_COLOR_COMPONENT_A_BIT;
+  cbAtt.colorWriteMask = VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT|
+                         VK_COLOR_COMPONENT_B_BIT|VK_COLOR_COMPONENT_A_BIT;
   VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
-  cb.attachmentCount = 1;
-  cb.pAttachments = &cbAtt;
+  cb.attachmentCount = 1; cb.pAttachments = &cbAtt;
 
   VkDynamicState dynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
   VkPipelineDynamicStateCreateInfo dyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
-  dyn.dynamicStateCount = 2;
-  dyn.pDynamicStates = dynStates;
+  dyn.dynamicStateCount = 2; dyn.pDynamicStates = dynStates;
 
+  // Dynamic rendering format
   VkPipelineRenderingCreateInfo renderInfo{ VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
-  VkFormat colorFmt = ci.color_format;
+  VkFormat colorFmt = color_format_;
   renderInfo.colorAttachmentCount = 1;
   renderInfo.pColorAttachmentFormats = &colorFmt;
 
   VkGraphicsPipelineCreateInfo gpc{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
   gpc.pNext = &renderInfo;
-  gpc.stageCount = 2;
-  gpc.pStages = stages;
+  gpc.stageCount = 2; gpc.pStages = stages;
   gpc.pVertexInputState   = &vin;
   gpc.pInputAssemblyState = &ia;
   gpc.pViewportState      = &vp;
@@ -100,8 +126,7 @@ TrianglePipeline::TrianglePipeline(const TrianglePipelineCreateInfo& ci)
   gpc.pColorBlendState    = &cb;
   gpc.pDynamicState       = &dyn;
   gpc.layout = layout_;
-  gpc.renderPass = VK_NULL_HANDLE;
-  gpc.subpass = 0;
+  gpc.renderPass = VK_NULL_HANDLE; gpc.subpass = 0;
 
   VK_CHECK(vkCreateGraphicsPipelines(dev_, VK_NULL_HANDLE, 1, &gpc, nullptr, &pipeline_));
 
@@ -110,8 +135,9 @@ TrianglePipeline::TrianglePipeline(const TrianglePipelineCreateInfo& ci)
 }
 
 TrianglePipeline::~TrianglePipeline() {
-  if (pipeline_) vkDestroyPipeline(dev_, pipeline_, nullptr);
-  if (layout_)   vkDestroyPipelineLayout(dev_, layout_, nullptr);
+  if (pipeline_)    vkDestroyPipeline(dev_, pipeline_, nullptr);
+  if (layout_)      vkDestroyPipelineLayout(dev_, layout_, nullptr);
+  if (dset_layout_) vkDestroyDescriptorSetLayout(dev_, dset_layout_, nullptr);
 }
 
 } // namespace engine
