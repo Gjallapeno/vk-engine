@@ -62,6 +62,11 @@ void main(){
     ivec3 p = ivec3(gl_GlobalInvocationID.xyz) + P.regionMin;
     if (any(greaterThanEqual(p, P.regionMax))) return;
 
+    // Vulkan's texture coordinate system has (0,0,0) at the image's top-left
+    // corner. Our world space assumes Y=0 at the bottom, so flip the Y axis
+    // when accessing the storage images to keep terrain upright.
+    ivec3 imgp = ivec3(p.x, P.dim.y - 1 - p.y, p.z);
+
     uint shape = 0u;
     uint shapeMat = uint(P.material);
     vec3 pf = vec3(p) + 0.5;
@@ -93,8 +98,8 @@ void main(){
         }
     }
 
-    uint prev = imageLoad(occOut, p).r;
-    uint prevMat = imageLoad(matOut, p).r;
+    uint prev = imageLoad(occOut, imgp).r;
+    uint prevMat = imageLoad(matOut, imgp).r;
     uint v = prev;
     uint matv = prevMat;
     if(P.mode == MODE_CLEAR){
@@ -114,6 +119,6 @@ void main(){
             else { v = prev; matv = prevMat; }
         }
     }
-    imageStore(occOut, p, uvec4(v,0,0,0));
-    imageStore(matOut, p, uvec4(matv,0,0,0));
+    imageStore(occOut, imgp, uvec4(v,0,0,0));
+    imageStore(matOut, imgp, uvec4(matv,0,0,0));
 }
