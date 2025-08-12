@@ -55,4 +55,7 @@ void upload_image2d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
                     VkQueue queue, const void *src_rgba8, size_t src_bytes,
                     const Image2D &dst);
 
+// Destroy the internal transfer context used by upload helpers.
+void destroy_transfer_context();
+
 } // namespace engine
