@@ -131,15 +131,22 @@ void VulkanDevice::create_logical(bool enable_validation) {
     vkGetPhysicalDeviceFeatures(phys_, &supported);
     if (supported.samplerAnisotropy)
       feats.samplerAnisotropy = VK_TRUE;
-  
+    if (supported.fragmentStoresAndAtomics)
+      feats.fragmentStoresAndAtomics = VK_TRUE;
+
     // Dynamic rendering feature
     VkPhysicalDeviceDynamicRenderingFeatures dyn{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES };
     dyn.dynamicRendering = VK_TRUE;
 
+    // Timeline semaphore feature
+    VkPhysicalDeviceTimelineSemaphoreFeatures timeline{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES };
+    timeline.timelineSemaphore = VK_TRUE;
+
     // Synchronization2 feature
     VkPhysicalDeviceSynchronization2Features sync{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES };
     sync.synchronization2 = VK_TRUE;
-    dyn.pNext = &sync;
+    timeline.pNext = &sync;
+    dyn.pNext = &timeline;
 
     const char* kExts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME };
 
