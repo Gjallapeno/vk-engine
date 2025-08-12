@@ -40,17 +40,11 @@ Buffer create_buffer(VmaAllocator alloc, VkDeviceSize size, VkBufferUsageFlags u
 
   VkBufferCreateInfo bi{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
   bi.size = size;
-  bi.usage = usage; // vertex/index will pass VK_BUFFER_USAGE_VERTEX_BUFFER_BIT / INDEX_BUFFER_BIT
+  bi.usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT; // ensure copy capability
   bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
   VmaAllocationCreateInfo aci{};
-  aci.usage = VMA_MEMORY_USAGE_AUTO;
-
-  // IMPORTANT: allow CPU mapping on these buffers to avoid VMA assert.
-  // We'll move to a staging copy in a later step for perf.
-  aci.flags =
-      VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-      VMA_ALLOCATION_CREATE_MAPPED_BIT;
+  aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 
   VK_CHECK(vmaCreateBuffer(alloc, &bi, &aci, &b.buffer, &b.allocation, nullptr));
   return b;
@@ -63,11 +57,67 @@ void destroy_buffer(VmaAllocator alloc, Buffer& buf) {
   }
 }
 
-void upload_buffer(VmaAllocator alloc, const Buffer& dst, const void* data, size_t bytes) {
-  void* mapped = nullptr;
-  VK_CHECK(vmaMapMemory(alloc, dst.allocation, &mapped));
-  std::memcpy(mapped, data, bytes);
-  vmaUnmapMemory(alloc, dst.allocation);
+void upload_buffer(VmaAllocator alloc,
+                   VkDevice device,
+                   uint32_t queue_family,
+                   VkQueue queue,
+                   const Buffer& dst,
+                   const void* data,
+                   size_t bytes) {
+  // staging buffer
+  VkBuffer stagingBuf = VK_NULL_HANDLE;
+  VmaAllocation stagingAlloc = nullptr;
+  {
+    VkBufferCreateInfo bi{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bi.size = bytes;
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+
+    VmaAllocationCreateInfo aci{};
+    aci.usage = VMA_MEMORY_USAGE_AUTO;
+    aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+    VmaAllocationInfo info{};
+    VK_CHECK(vmaCreateBuffer(alloc, &bi, &aci, &stagingBuf, &stagingAlloc, &info));
+    std::memcpy(info.pMappedData, data, bytes);
+  }
+
+  // transient command buffer
+  VkCommandPool pool = VK_NULL_HANDLE;
+  VkCommandBuffer cmd = VK_NULL_HANDLE;
+  {
+    VkCommandPoolCreateInfo pci{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+    pci.queueFamilyIndex = queue_family;
+    pci.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT |
+                VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    VK_CHECK(vkCreateCommandPool(device, &pci, nullptr, &pool));
+
+    VkCommandBufferAllocateInfo ai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    ai.commandPool = pool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = 1;
+    VK_CHECK(vkAllocateCommandBuffers(device, &ai, &cmd));
+
+    VkCommandBufferBeginInfo bi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VK_CHECK(vkBeginCommandBuffer(cmd, &bi));
+  }
+
+  VkBufferCopy region{};
+  region.size = bytes;
+  vkCmdCopyBuffer(cmd, stagingBuf, dst.buffer, 1, &region);
+
+  VK_CHECK(vkEndCommandBuffer(cmd));
+
+  VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+  si.commandBufferCount = 1;
+  si.pCommandBuffers = &cmd;
+  VK_CHECK(vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE));
+  VK_CHECK(vkQueueWaitIdle(queue));
+
+  vkFreeCommandBuffers(device, pool, 1, &cmd);
+  vkDestroyCommandPool(device, pool, nullptr);
+  vmaDestroyBuffer(alloc, stagingBuf, stagingAlloc);
 }
 
 // ---------- images ----------
