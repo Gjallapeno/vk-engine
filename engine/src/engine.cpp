@@ -10,6 +10,7 @@
 #include <engine/gfx/vulkan_swapchain.hpp>
 #include <engine/gfx/vulkan_commands.hpp>
 #include <engine/gfx/present_pipeline.hpp>
+#include <engine/gfx/ray_pipeline.hpp>
 #include <engine/gfx/memory.hpp>
 #include <engine/camera.hpp>
 
@@ -45,8 +46,10 @@ static std::filesystem::path exe_dir() {
 }
 
 struct DrawCtx {
-  PresentPipeline* pipe = nullptr;
-  VkDescriptorSet   dset = VK_NULL_HANDLE;
+  RayPipeline*      ray_pipe = nullptr;
+  VkDescriptorSet   ray_dset = VK_NULL_HANDLE;
+  PresentPipeline*  light_pipe = nullptr;
+  VkDescriptorSet   light_dset = VK_NULL_HANDLE;
   VkPipeline        comp_pipe = VK_NULL_HANDLE;
   VkPipelineLayout  comp_layout = VK_NULL_HANDLE;
   VkDescriptorSet   comp_set = VK_NULL_HANDLE;
@@ -56,6 +59,12 @@ struct DrawCtx {
   VkImage           occ_image = VK_NULL_HANDLE;
   VkImage           mat_image = VK_NULL_HANDLE;
   VkImage           occ_l1_image = VK_NULL_HANDLE;
+  VkImage           g_albedo = VK_NULL_HANDLE;
+  VkImage           g_normal = VK_NULL_HANDLE;
+  VkImage           g_depth  = VK_NULL_HANDLE;
+  VkImageView       g_albedo_view = VK_NULL_HANDLE;
+  VkImageView       g_normal_view = VK_NULL_HANDLE;
+  VkImageView       g_depth_view  = VK_NULL_HANDLE;
   VkExtent3D        occ_dim{0,0,0};
   VkExtent3D        dispatch_dim{0,0,0};
   VkExtent3D        occ_l1_dim{0,0,0};
@@ -67,7 +76,7 @@ struct CameraUBO {
   glm::mat4 inv_view_proj{1.0f};
   glm::vec2 resolution{0.0f};
   float     time = 0.0f;
-  float     _pad = 0.0f; // std140 alignment
+  float     debug_normals = 0.0f;
 };
 
 struct VoxelAABB {
@@ -106,7 +115,6 @@ static VkShaderModule load_module(VkDevice dev, const std::string& path) {
 static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
                            VkFormat, VkExtent2D extent, void* user) {
   auto* ctx = static_cast<DrawCtx*>(user);
-
   VkImageMemoryBarrier pre[3]{ { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER }, { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER }, { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER } };
   for(int i=0;i<3;i++){
     pre[i].srcAccessMask = ctx->first_frame ? 0 : VK_ACCESS_SHADER_READ_BIT;
@@ -174,8 +182,76 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                        0, 0, nullptr, 0, nullptr, 3, post);
-  ctx->first_frame = false;
 
+  // Prepare G-buffer images for color attachment writes
+  VkImageMemoryBarrier gpre[3]{ {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}, {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}, {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER} };
+  for(int i=0;i<3;i++){
+    gpre[i].srcAccessMask = ctx->first_frame ? 0 : VK_ACCESS_SHADER_READ_BIT;
+    gpre[i].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    gpre[i].oldLayout = ctx->first_frame ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    gpre[i].newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    gpre[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    gpre[i].subresourceRange.levelCount = 1;
+    gpre[i].subresourceRange.layerCount = 1;
+  }
+  gpre[0].image = ctx->g_albedo;
+  gpre[1].image = ctx->g_normal;
+  gpre[2].image = ctx->g_depth;
+  VkPipelineStageFlags gpreSrc = ctx->first_frame ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+  vkCmdPipelineBarrier(cmd, gpreSrc, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                       0, 0, nullptr, 0, nullptr, 3, gpre);
+
+  // Geometry pass writing G-buffer
+  VkRenderingAttachmentInfo gAtt[3]{ {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO}, {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO}, {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO} };
+  VkClearValue gclear{}; gclear.color = {{0,0,0,0}};
+  gAtt[0].imageView = ctx->g_albedo_view; gAtt[0].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  gAtt[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; gAtt[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE; gAtt[0].clearValue = gclear;
+  gAtt[1].imageView = ctx->g_normal_view; gAtt[1].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  gAtt[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; gAtt[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE; gAtt[1].clearValue = gclear;
+  gAtt[2].imageView = ctx->g_depth_view; gAtt[2].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  gAtt[2].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; gAtt[2].storeOp = VK_ATTACHMENT_STORE_OP_STORE; gAtt[2].clearValue = gclear;
+
+  VkRenderingInfo gi{ VK_STRUCTURE_TYPE_RENDERING_INFO };
+  gi.renderArea.offset = {0,0};
+  gi.renderArea.extent = extent;
+  gi.layerCount = 1;
+  gi.colorAttachmentCount = 3;
+  gi.pColorAttachments = gAtt;
+
+  vkCmdBeginRendering(cmd, &gi);
+
+  VkViewport vp{};
+  vp.x = 0.0f;
+  vp.y = static_cast<float>(extent.height);
+  vp.width  = static_cast<float>(extent.width);
+  vp.height = -static_cast<float>(extent.height);
+  vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
+  vkCmdSetViewport(cmd, 0, 1, &vp);
+  VkRect2D sc{ {0,0}, extent }; vkCmdSetScissor(cmd, 0, 1, &sc);
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->ray_pipe->pipeline());
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->ray_pipe->layout(),
+                          0, 1, &ctx->ray_dset, 0, nullptr);
+  vkCmdDraw(cmd, 3, 1, 0, 0);
+  vkCmdEndRendering(cmd);
+
+  // Transition G-buffer for sampling
+  VkImageMemoryBarrier gpost[3]{ {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}, {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}, {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER} };
+  for(int i=0;i<3;i++){
+    gpost[i].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    gpost[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    gpost[i].oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    gpost[i].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    gpost[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    gpost[i].subresourceRange.levelCount = 1;
+    gpost[i].subresourceRange.layerCount = 1;
+  }
+  gpost[0].image = ctx->g_albedo;
+  gpost[1].image = ctx->g_normal;
+  gpost[2].image = ctx->g_depth;
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                       0, 0, nullptr, 0, nullptr, 3, gpost);
+
+  // Lighting pass to final image
   VkRenderingAttachmentInfo color{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
   color.imageView   = view;
   color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -192,25 +268,15 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   ri.pColorAttachments = &color;
 
   vkCmdBeginRendering(cmd, &ri);
-
-  // Flipped viewport (negative height to keep winding consistent)
-  VkViewport vp{};
-  vp.x = 0.0f;
-  vp.y = static_cast<float>(extent.height);
-  vp.width  = static_cast<float>(extent.width);
-  vp.height = -static_cast<float>(extent.height);
-  vp.minDepth = 0.0f; vp.maxDepth = 1.0f;
   vkCmdSetViewport(cmd, 0, 1, &vp);
-
-  VkRect2D sc{ {0,0}, extent };
   vkCmdSetScissor(cmd, 0, 1, &sc);
-
-  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipe->pipeline());
-  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->pipe->layout(),
-                          0, 1, &ctx->dset, 0, nullptr);
-
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->light_pipe->pipeline());
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ctx->light_pipe->layout(),
+                          0, 1, &ctx->light_dset, 0, nullptr);
   vkCmdDraw(cmd, 3, 1, 0, 0);
   vkCmdEndRendering(cmd);
+
+  ctx->first_frame = false;
 }
 
 int run() {
@@ -236,7 +302,8 @@ int run() {
 
   const auto shader_dir = exe_dir() / "shaders";
   const auto vs_path = (shader_dir / "vs_fullscreen.vert.spv").string();
-  const auto fs_path = (shader_dir / "fs_present.frag.spv").string();
+  const auto ray_fs_path = (shader_dir / "fs_raycast.frag.spv").string();
+  const auto light_fs_path = (shader_dir / "fs_lighting.frag.spv").string();
   spdlog::info("[vk] Using shaders: {}", shader_dir.string());
 
   GpuAllocator allocator; allocator.init(instance.vk(), device.physical(), device.device());
@@ -453,25 +520,40 @@ int run() {
 
   std::unique_ptr<VulkanSwapchain>   swapchain;
   std::unique_ptr<VulkanCommands>    commands;
-  std::unique_ptr<PresentPipeline>   pipeline;
+  std::unique_ptr<RayPipeline>       ray_pipeline;
+  std::unique_ptr<PresentPipeline>   present_pipeline;
 
   VkDescriptorPool dpool = VK_NULL_HANDLE;
-  VkDescriptorSet  dset  = VK_NULL_HANDLE;
+  VkDescriptorSet  ray_dset  = VK_NULL_HANDLE;
+  VkDescriptorSet  light_dset = VK_NULL_HANDLE;
 
   DrawCtx ctx{};
 
-  // Descriptor pool for camera, voxel AABB and voxel textures
+  // Descriptor pool for geometry and lighting passes
   {
     VkDescriptorPoolSize sizes[2]{};
-    sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; sizes[0].descriptorCount = 2;
-    sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; sizes[1].descriptorCount = 3;
+    sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; sizes[0].descriptorCount = 3;
+    sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; sizes[1].descriptorCount = 6;
     VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    dpci.maxSets = 1; dpci.poolSizeCount = 2; dpci.pPoolSizes = sizes;
+    dpci.maxSets = 2; dpci.poolSizeCount = 2; dpci.pPoolSizes = sizes;
     VK_CHECK(vkCreateDescriptorPool(device.device(), &dpci, nullptr, &dpool));
   }
 
+  Image2D g_albedo_img{};
+  Image2D g_normal_img{};
+  Image2D g_depth_img{};
+  VkImageView g_albedo_view = VK_NULL_HANDLE;
+  VkImageView g_normal_view = VK_NULL_HANDLE;
+  VkImageView g_depth_view = VK_NULL_HANDLE;
+
   auto destroy_swapchain_stack = [&]() {
+    if (ray_dset) { vkFreeDescriptorSets(device.device(), dpool, 1, &ray_dset); ray_dset = VK_NULL_HANDLE; }
+    if (light_dset) { vkFreeDescriptorSets(device.device(), dpool, 1, &light_dset); light_dset = VK_NULL_HANDLE; }
+    if (g_albedo_view) vkDestroyImageView(device.device(), g_albedo_view, nullptr);
+    if (g_normal_view) vkDestroyImageView(device.device(), g_normal_view, nullptr);
+    if (g_depth_view) vkDestroyImageView(device.device(), g_depth_view, nullptr);
+    destroy_image2d(allocator.raw(), g_albedo_img); destroy_image2d(allocator.raw(), g_normal_img); destroy_image2d(allocator.raw(), g_depth_img);
     commands.reset();
     swapchain.reset();
   };
@@ -488,68 +570,79 @@ int run() {
     cci.image_count = static_cast<uint32_t>(swapchain->image_views().size());
     commands = std::make_unique<VulkanCommands>(cci);
 
-    if (!pipeline || pipeline->color_format() != swapchain->image_format()) {
-      PresentPipelineCreateInfo pci{};
-      pci.device = device.device();
-      pci.pipeline_cache = device.pipeline_cache();
-      pci.color_format = swapchain->image_format();
-      pci.vs_spv = vs_path; pci.fs_spv = fs_path;
-      pipeline = std::make_unique<PresentPipeline>(pci);
+    if (!ray_pipeline) {
+      RayPipelineCreateInfo rpci{}; rpci.device = device.device(); rpci.pipeline_cache = device.pipeline_cache();
+      rpci.vs_spv = vs_path; rpci.fs_spv = ray_fs_path;
+      ray_pipeline = std::make_unique<RayPipeline>(rpci);
+    }
+    if (!present_pipeline || present_pipeline->color_format() != swapchain->image_format()) {
+      PresentPipelineCreateInfo pci{}; pci.device = device.device();
+      pci.pipeline_cache = device.pipeline_cache(); pci.color_format = swapchain->image_format();
+      pci.vs_spv = vs_path; pci.fs_spv = light_fs_path;
+      present_pipeline = std::make_unique<PresentPipeline>(pci);
     }
 
-    if (dset) {
-      vkFreeDescriptorSets(device.device(), dpool, 1, &dset);
-      dset = VK_NULL_HANDLE;
-    }
+    if (ray_dset) { vkFreeDescriptorSets(device.device(), dpool, 1, &ray_dset); ray_dset = VK_NULL_HANDLE; }
+    if (light_dset) { vkFreeDescriptorSets(device.device(), dpool, 1, &light_dset); light_dset = VK_NULL_HANDLE; }
 
     VkDescriptorSetAllocateInfo ai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
     ai.descriptorPool = dpool;
-    VkDescriptorSetLayout layout = pipeline->dset_layout();
+    VkDescriptorSetLayout layout = ray_pipeline->dset_layout();
     ai.descriptorSetCount = 1; ai.pSetLayouts = &layout;
-    VK_CHECK(vkAllocateDescriptorSets(device.device(), &ai, &dset));
+    VK_CHECK(vkAllocateDescriptorSets(device.device(), &ai, &ray_dset));
 
     VkDescriptorBufferInfo cam_bi{}; cam_bi.buffer = cam_buf.buffer; cam_bi.range = sizeof(CameraUBO);
     VkDescriptorBufferInfo vox_bi{}; vox_bi.buffer = vox_buf.buffer; vox_bi.range = sizeof(VoxelAABB);
-    VkDescriptorImageInfo occ_info{}; occ_info.sampler = nearest_sampler; occ_info.imageView = occ_view;
-    occ_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    VkDescriptorImageInfo mat_info{}; mat_info.sampler = nearest_sampler; mat_info.imageView = mat_view;
-    mat_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    VkDescriptorImageInfo occ_l1_info{}; occ_l1_info.sampler = nearest_sampler; occ_l1_info.imageView = occ_l1_view;
-    occ_l1_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorImageInfo occ_info{}; occ_info.sampler = nearest_sampler; occ_info.imageView = occ_view; occ_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorImageInfo mat_info{}; mat_info.sampler = nearest_sampler; mat_info.imageView = mat_view; mat_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorImageInfo occ_l1_info{}; occ_l1_info.sampler = nearest_sampler; occ_l1_info.imageView = occ_l1_view; occ_l1_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    VkWriteDescriptorSet writes[5]{};
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = dset; writes[0].dstBinding = 0;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    writes[0].descriptorCount = 1; writes[0].pBufferInfo = &cam_bi;
+    VkWriteDescriptorSet rwrites[5]{};
+    rwrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; rwrites[0].dstSet = ray_dset; rwrites[0].dstBinding = 0; rwrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; rwrites[0].descriptorCount = 1; rwrites[0].pBufferInfo = &cam_bi;
+    rwrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; rwrites[1].dstSet = ray_dset; rwrites[1].dstBinding = 1; rwrites[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; rwrites[1].descriptorCount = 1; rwrites[1].pBufferInfo = &vox_bi;
+    rwrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; rwrites[2].dstSet = ray_dset; rwrites[2].dstBinding = 2; rwrites[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; rwrites[2].descriptorCount = 1; rwrites[2].pImageInfo = &occ_info;
+    rwrites[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; rwrites[3].dstSet = ray_dset; rwrites[3].dstBinding = 3; rwrites[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; rwrites[3].descriptorCount = 1; rwrites[3].pImageInfo = &mat_info;
+    rwrites[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; rwrites[4].dstSet = ray_dset; rwrites[4].dstBinding = 4; rwrites[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; rwrites[4].descriptorCount = 1; rwrites[4].pImageInfo = &occ_l1_info;
+    vkUpdateDescriptorSets(device.device(), 5, rwrites, 0, nullptr);
 
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = dset; writes[1].dstBinding = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    writes[1].descriptorCount = 1; writes[1].pBufferInfo = &vox_bi;
+    g_albedo_img = create_image2d(allocator.raw(), sw, sh, VK_FORMAT_R8G8B8A8_UNORM,
+                                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    g_normal_img = create_image2d(allocator.raw(), sw, sh, VK_FORMAT_R16G16B16A16_SFLOAT,
+                                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    g_depth_img = create_image2d(allocator.raw(), sw, sh, VK_FORMAT_R32_SFLOAT,
+                                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
 
-    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[2].dstSet = dset; writes[2].dstBinding = 2;
-    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[2].descriptorCount = 1; writes[2].pImageInfo = &occ_info;
+    VkImageViewCreateInfo iv{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    iv.viewType = VK_IMAGE_VIEW_TYPE_2D; iv.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; iv.subresourceRange.levelCount = 1; iv.subresourceRange.layerCount = 1;
+    iv.image = g_albedo_img.image; iv.format = VK_FORMAT_R8G8B8A8_UNORM; VK_CHECK(vkCreateImageView(device.device(), &iv, nullptr, &g_albedo_view));
+    iv.image = g_normal_img.image; iv.format = VK_FORMAT_R16G16B16A16_SFLOAT; VK_CHECK(vkCreateImageView(device.device(), &iv, nullptr, &g_normal_view));
+    iv.image = g_depth_img.image; iv.format = VK_FORMAT_R32_SFLOAT; VK_CHECK(vkCreateImageView(device.device(), &iv, nullptr, &g_depth_view));
 
-    writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[3].dstSet = dset; writes[3].dstBinding = 3;
-    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[3].descriptorCount = 1; writes[3].pImageInfo = &mat_info;
+    VkDescriptorSetLayout layout2 = present_pipeline->dset_layout();
+    ai.pSetLayouts = &layout2;
+    VK_CHECK(vkAllocateDescriptorSets(device.device(), &ai, &light_dset));
 
-    writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[4].dstSet = dset; writes[4].dstBinding = 4;
-    writes[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[4].descriptorCount = 1; writes[4].pImageInfo = &occ_l1_info;
+    VkDescriptorImageInfo albedo_info{}; albedo_info.sampler = linear_sampler; albedo_info.imageView = g_albedo_view; albedo_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorImageInfo normal_info{}; normal_info.sampler = linear_sampler; normal_info.imageView = g_normal_view; normal_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorImageInfo depth_info{}; depth_info.sampler = linear_sampler; depth_info.imageView = g_depth_view; depth_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    vkUpdateDescriptorSets(device.device(), 5, writes, 0, nullptr);
+    VkWriteDescriptorSet lwrites[4]{};
+    lwrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; lwrites[0].dstSet = light_dset; lwrites[0].dstBinding = 0; lwrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; lwrites[0].descriptorCount = 1; lwrites[0].pBufferInfo = &cam_bi;
+    lwrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; lwrites[1].dstSet = light_dset; lwrites[1].dstBinding = 1; lwrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; lwrites[1].descriptorCount = 1; lwrites[1].pImageInfo = &albedo_info;
+    lwrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; lwrites[2].dstSet = light_dset; lwrites[2].dstBinding = 2; lwrites[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; lwrites[2].descriptorCount = 1; lwrites[2].pImageInfo = &normal_info;
+    lwrites[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; lwrites[3].dstSet = light_dset; lwrites[3].dstBinding = 3; lwrites[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; lwrites[3].descriptorCount = 1; lwrites[3].pImageInfo = &depth_info;
+    vkUpdateDescriptorSets(device.device(), 4, lwrites, 0, nullptr);
+
+    ctx.ray_pipe = ray_pipeline.get(); ctx.ray_dset = ray_dset;
+    ctx.light_pipe = present_pipeline.get(); ctx.light_dset = light_dset;
+    ctx.g_albedo = g_albedo_img.image; ctx.g_normal = g_normal_img.image; ctx.g_depth = g_depth_img.image;
+    ctx.g_albedo_view = g_albedo_view; ctx.g_normal_view = g_normal_view; ctx.g_depth_view = g_depth_view;
+    ctx.first_frame = true;
   };
 
   { auto fb = window->framebuffer_size();
     create_swapchain_stack(static_cast<uint32_t>(fb.first), static_cast<uint32_t>(fb.second)); }
 
-  ctx.pipe = pipeline.get(); ctx.dset = dset;
   ctx.comp_pipe = comp_pipeline; ctx.comp_layout = comp_layout; ctx.comp_set = comp_set;
   ctx.comp_l1_pipe = comp_l1_pipeline; ctx.comp_l1_layout = comp_l1_layout; ctx.comp_l1_set = comp_l1_set;
   ctx.occ_image = occ_img.image; ctx.mat_image = mat_img.image; ctx.occ_l1_image = occ_l1_img.image;
@@ -649,7 +742,6 @@ int run() {
       vkDeviceWaitIdle(device.device());
       destroy_swapchain_stack();
       create_swapchain_stack(want.width, want.height);
-      ctx.pipe = pipeline.get(); ctx.dset = dset;
       last = swapchain->extent();
       std::this_thread::sleep_for(1ms);
       continue;
@@ -663,6 +755,7 @@ int run() {
     ubo.resolution = { static_cast<float>(swapchain->extent().width),
                        static_cast<float>(swapchain->extent().height) };
     ubo.time = total_time;
+    ubo.debug_normals = (glfwGetKey(glfw_win, GLFW_KEY_N) == GLFW_PRESS) ? 1.0f : 0.0f;
     upload_buffer(allocator.raw(), device.device(), device.graphics_family(),
                   device.graphics_queue(), cam_buf, &ubo, sizeof(ubo));
 
@@ -703,8 +796,8 @@ int run() {
   vkDeviceWaitIdle(device.device());
 
   destroy_swapchain_stack();
-  pipeline.reset();
-  if (dset) vkFreeDescriptorSets(device.device(), dpool, 1, &dset);
+  ray_pipeline.reset();
+  present_pipeline.reset();
   if (dpool) vkDestroyDescriptorPool(device.device(), dpool, nullptr);
   if (comp_set) vkFreeDescriptorSets(device.device(), comp_pool, 1, &comp_set);
   if (comp_pool) vkDestroyDescriptorPool(device.device(), comp_pool, nullptr);
