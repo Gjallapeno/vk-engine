@@ -128,21 +128,18 @@ void VulkanDevice::create_logical(bool enable_validation) {
   
     VkPhysicalDeviceFeatures feats{}; // keep default
   
-    // Dynamic rendering and timeline semaphore features
+    // Dynamic rendering feature
     VkPhysicalDeviceDynamicRenderingFeatures dyn{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES };
     dyn.dynamicRendering = VK_TRUE;
-    VkPhysicalDeviceTimelineSemaphoreFeatures timeline{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES };
-    timeline.timelineSemaphore = VK_TRUE;
-    timeline.pNext = &dyn;
 
-    const char* kExts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME };
+    const char* kExts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 
     VkDeviceCreateInfo di{ VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
-    di.pNext = &timeline;
+    di.pNext = &dyn;
     di.queueCreateInfoCount = static_cast<uint32_t>(qinfos.size());
     di.pQueueCreateInfos = qinfos.data();
     di.pEnabledFeatures = &feats;
-    di.enabledExtensionCount = 2;
+    di.enabledExtensionCount = 1;
     di.ppEnabledExtensionNames = kExts;
   
     VK_CHECK(vkCreateDevice(phys_, &di, nullptr, &dev_));
