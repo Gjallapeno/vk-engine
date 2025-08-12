@@ -107,9 +107,12 @@ bool gridRaycast(Ray r, out int stepsL1, out int stepsL0) {
     for(int i=0;i<1024;i++){
         if(any(lessThan(cell1, ivec3(0))) || any(greaterThanEqual(cell1, dim1))) break;
         if(texelFetch(uOccTexL1, cell1, 0).r > 0u){
-            Ray r2; r2.o = pos; r2.d = r.d;
+            // Start slightly inside the cell to avoid re-testing boundary
+            Ray r2; r2.o = pos + r.d * 1e-3; r2.d = r.d;
             int s0; bool hit = gridRaycastL0(r2, s0);
-            stepsL0 += s0; if(hit) return true; else return false;
+            stepsL0 += s0;
+            if(hit) return true;
+            // MISS -> continue to next L1 cell
         }
         stepsL1++;
         if(tMax.x < tMax.y){
@@ -135,13 +138,14 @@ float shadowVisibility(vec3 P, vec3 N, vec3 L, out int stepsL1, out int stepsL0)
     stepsL1 = 0;
     stepsL0 = 0;
 
-    // Backfaces don't receive light
+    // Clamp diffuse first (cheap backface test)
     float NdotL = dot(N, L);
     if (NdotL <= 0.0) return 0.0;
 
-    // Offset start to avoid self-occlusion
-    const float eps = 0.501;
-    Ray r; r.o = P + N * eps; r.d = L;
+    // IMPORTANT: offset along L in voxel units
+    const float epsVox = 0.501;
+    Ray r; r.o = P + L * epsVox; // offset along light dir
+    r.d = L;
 
     bool hit = gridRaycast(r, stepsL1, stepsL0);
     return hit ? 0.0 : 1.0;
