@@ -5,12 +5,13 @@ layout(location=2) out float outDepth;
 
 layout(set=0, binding=0, std140) uniform Camera {
     mat4 invViewProj;
-    vec2 resolution;
+    vec2 renderResolution;
+    vec2 outputResolution;
     float time;
     float debugNormals; // reused in lighting pass
     float debugLevel;
     float debugSteps;
-    vec2 pad0;
+    vec4 pad0;
 } cam;
 
 layout(set=0, binding=1, std140) uniform VoxelAABB {
@@ -29,7 +30,7 @@ const int STEPS_SCALE = 4;
 struct Ray { vec3 o; vec3 d; };
 
 Ray makeRay(vec2 p) {
-    vec2 ndc = (p / cam.resolution) * 2.0 - 1.0;
+    vec2 ndc = (p / cam.renderResolution) * 2.0 - 1.0;
     vec4 h0 = cam.invViewProj * vec4(ndc, 0.0, 1.0);
     vec4 h1 = cam.invViewProj * vec4(ndc, 1.0, 1.0);
     vec3 ro = h0.xyz / h0.w;
