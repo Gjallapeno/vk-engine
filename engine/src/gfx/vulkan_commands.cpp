@@ -19,13 +19,12 @@ VulkanCommands::VulkanCommands(const VulkanCommandsCreateInfo& ci)
   frames_.resize(std::max<uint32_t>(ci.image_count, 1u));
 
   for (auto& f : frames_) {
-    VkFenceCreateInfo fi{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-    fi.flags = VK_FENCE_CREATE_SIGNALED_BIT; // start signaled
-    VK_CHECK(vkCreateFence(dev_, &fi, nullptr, &f.in_flight));
-
+    VkSemaphoreTypeCreateInfo tci{ VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO };
+    tci.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    tci.initialValue = 0;
     VkSemaphoreCreateInfo sci{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-    VK_CHECK(vkCreateSemaphore(dev_, &sci, nullptr, &f.image_acquired));
-    VK_CHECK(vkCreateSemaphore(dev_, &sci, nullptr, &f.render_finished));
+    sci.pNext = &tci;
+    VK_CHECK(vkCreateSemaphore(dev_, &sci, nullptr, &f.timeline));
 
     VkCommandPoolCreateInfo pci{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
     pci.queueFamilyIndex = gfx_family_;
@@ -47,9 +46,7 @@ VulkanCommands::~VulkanCommands() {
   for (auto& f : frames_) {
     if (f.cmd)            vkFreeCommandBuffers(dev_, f.cmd_pool, 1, &f.cmd);
     if (f.cmd_pool)       vkDestroyCommandPool(dev_, f.cmd_pool, nullptr);
-    if (f.in_flight)      vkDestroyFence(dev_, f.in_flight, nullptr);
-    if (f.image_acquired) vkDestroySemaphore(dev_, f.image_acquired, nullptr);
-    if (f.render_finished) vkDestroySemaphore(dev_, f.render_finished, nullptr);
+    if (f.timeline)       vkDestroySemaphore(dev_, f.timeline, nullptr);
   }
 }
 
@@ -66,13 +63,17 @@ uint32_t VulkanCommands::acquire_record_present(
 {
   auto& f = frames_[frame_cursor_];
 
-  // Wait and reset fence for this frame slot
-  VK_CHECK(vkWaitForFences(dev_, 1, &f.in_flight, VK_TRUE, UINT64_MAX));
-  VK_CHECK(vkResetFences(dev_, 1, &f.in_flight));
+  // Wait for previous work on this frame to finish
+  VkSemaphoreWaitInfo frame_wait{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+  frame_wait.semaphoreCount = 1;
+  frame_wait.pSemaphores = &f.timeline;
+  frame_wait.pValues = &f.value;
+  VK_CHECK(vkWaitSemaphores(dev_, &frame_wait, UINT64_MAX));
 
   // Acquire image
   uint32_t image_index = 0;
-  VkResult acq = vkAcquireNextImageKHR(dev_, swapchain, UINT64_MAX, f.image_acquired, VK_NULL_HANDLE, &image_index);
+  uint64_t acquire_value = f.value + 1;
+  VkResult acq = vkAcquireNextImageKHR(dev_, swapchain, UINT64_MAX, f.timeline, VK_NULL_HANDLE, &image_index);
   if (acq == VK_ERROR_OUT_OF_DATE_KHR) {
     spdlog::warn("[vk] Acquire returned OUT_OF_DATE (resize will recreate).");
     return image_index;
@@ -132,22 +133,36 @@ uint32_t VulkanCommands::acquire_record_present(
   f.first_use = false;
 
   // Submit
+  uint64_t submit_signal_value = acquire_value + 1;
+  VkTimelineSemaphoreSubmitInfo tsi{ VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
+  tsi.waitSemaphoreValueCount = 1;
+  tsi.pWaitSemaphoreValues = &acquire_value;
+  tsi.signalSemaphoreValueCount = 1;
+  tsi.pSignalSemaphoreValues = &submit_signal_value;
+
   VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
   VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+  si.pNext = &tsi;
   si.waitSemaphoreCount = 1;
-  si.pWaitSemaphores = &f.image_acquired;
+  si.pWaitSemaphores = &f.timeline;
   si.pWaitDstStageMask = &wait_stage;
   si.commandBufferCount = 1;
   si.pCommandBuffers = &f.cmd;
   si.signalSemaphoreCount = 1;
-  si.pSignalSemaphores = &f.render_finished;
-  
-  VK_CHECK(vkQueueSubmit(graphics_queue, 1, &si, f.in_flight));
+  si.pSignalSemaphores = &f.timeline;
+
+  VK_CHECK(vkQueueSubmit(graphics_queue, 1, &si, VK_NULL_HANDLE));
+
+  // Wait for rendering to complete before presenting
+  VkSemaphoreWaitInfo present_wait{ VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+  present_wait.semaphoreCount = 1;
+  present_wait.pSemaphores = &f.timeline;
+  present_wait.pValues = &submit_signal_value;
+  VK_CHECK(vkWaitSemaphores(dev_, &present_wait, UINT64_MAX));
 
   // Present
   VkPresentInfoKHR pi{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
-  pi.waitSemaphoreCount = 1;
-  pi.pWaitSemaphores = &f.render_finished;
+  pi.waitSemaphoreCount = 0;
   pi.swapchainCount = 1;
   pi.pSwapchains = &swapchain;
   pi.pImageIndices = &image_index;
@@ -160,7 +175,8 @@ uint32_t VulkanCommands::acquire_record_present(
     VK_CHECK(pres);
   }
 
-  // Next frame
+  // Update timeline value and next frame
+  f.value = submit_signal_value;
   frame_cursor_ = (frame_cursor_ + 1) % static_cast<uint32_t>(frames_.size());
   return image_index;
 }

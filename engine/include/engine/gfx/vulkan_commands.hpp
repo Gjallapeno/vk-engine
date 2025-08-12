@@ -43,12 +43,11 @@ private:
   uint32_t  gfx_family_ = ~0u;
 
   struct Frame {
-    VkFence         in_flight = VK_NULL_HANDLE;
-    VkSemaphore     image_acquired = VK_NULL_HANDLE;
-    VkSemaphore     render_finished = VK_NULL_HANDLE;
-    VkCommandPool   cmd_pool = VK_NULL_HANDLE;
-    VkCommandBuffer cmd      = VK_NULL_HANDLE;
-    bool            first_use = true;
+    VkSemaphore     timeline    = VK_NULL_HANDLE;
+    uint64_t        value       = 0;            // last signaled value
+    VkCommandPool   cmd_pool    = VK_NULL_HANDLE;
+    VkCommandBuffer cmd         = VK_NULL_HANDLE;
+    bool            first_use   = true;
   };
   std::vector<Frame> frames_;
   uint32_t frame_cursor_ = 0;
