@@ -41,11 +41,44 @@ struct DrawCtx {
   VkBuffer          vbo  = VK_NULL_HANDLE;
   VkBuffer          ibo  = VK_NULL_HANDLE;
   VkIndexType       index_type = VK_INDEX_TYPE_UINT16;
+  const std::vector<VkImage>* swap_images = nullptr;
+  std::vector<Image2D>        depth_images;
+  std::vector<VkImageView>    depth_views;
+  std::vector<bool>           depth_first_use;
 };
 
-static void record_textured(VkCommandBuffer cmd, VkImage, VkImageView view,
+static void record_textured(VkCommandBuffer cmd, VkImage swap_img, VkImageView view,
                             VkFormat, VkExtent2D extent, void* user) {
   auto* ctx = static_cast<DrawCtx*>(user);
+
+  uint32_t idx = 0;
+  if (ctx->swap_images) {
+    for (uint32_t i = 0; i < ctx->swap_images->size(); ++i) {
+      if ((*ctx->swap_images)[i] == swap_img) { idx = i; break; }
+    }
+  }
+
+  VkImageView depth_view = ctx->depth_views[idx];
+  if (ctx->depth_first_use[idx]) {
+    VkImageMemoryBarrier to_depth{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    to_depth.srcAccessMask = 0;
+    to_depth.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    to_depth.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    to_depth.newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    to_depth.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_depth.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_depth.image = ctx->depth_images[idx].image;
+    to_depth.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    to_depth.subresourceRange.baseMipLevel = 0;
+    to_depth.subresourceRange.levelCount = 1;
+    to_depth.subresourceRange.baseArrayLayer = 0;
+    to_depth.subresourceRange.layerCount = 1;
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &to_depth);
+    ctx->depth_first_use[idx] = false;
+  }
 
   VkRenderingAttachmentInfo color{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
   color.imageView   = view;
@@ -55,12 +88,21 @@ static void record_textured(VkCommandBuffer cmd, VkImage, VkImageView view,
   VkClearValue clear; clear.color = { {0.06f, 0.07f, 0.10f, 1.0f} };
   color.clearValue = clear;
 
+  VkRenderingAttachmentInfo depth{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+  depth.imageView   = depth_view;
+  depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+  depth.loadOp  = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkClearValue dclear; dclear.depthStencil = {1.0f, 0};
+  depth.clearValue = dclear;
+
   VkRenderingInfo ri{ VK_STRUCTURE_TYPE_RENDERING_INFO };
   ri.renderArea.offset = {0, 0};
   ri.renderArea.extent = extent;
   ri.layerCount = 1;
   ri.colorAttachmentCount = 1;
   ri.pColorAttachments = &color;
+  ri.pDepthAttachment = &depth;
 
   vkCmdBeginRendering(cmd, &ri);
 
@@ -117,11 +159,11 @@ int run() {
 
   // Rectangle geometry (CCW order)
   const float verts[] = {
-    //   x,     y,     u,   v
-    -0.9f, -0.6f,  0.0f, 1.0f,  // 0: bottom-left
-     0.9f, -0.6f,  1.0f, 1.0f,  // 1: bottom-right
-     0.9f,  0.6f,  1.0f, 0.0f,  // 2: top-right
-    -0.9f,  0.6f,  0.0f, 0.0f   // 3: top-left
+    //   x,     y,     z,     u,   v
+    -0.9f, -0.6f,  0.0f,  0.0f, 1.0f,  // 0: bottom-left
+     0.9f, -0.6f,  0.0f,  1.0f, 1.0f,  // 1: bottom-right
+     0.9f,  0.6f,  0.0f,  1.0f, 0.0f,  // 2: top-right
+    -0.9f,  0.6f,  0.0f,  0.0f, 0.0f   // 3: top-left
   };
   const uint16_t indices[] = { 0, 1, 2, 2, 3, 0 };
 
@@ -186,6 +228,8 @@ int run() {
   VkDescriptorPool dpool = VK_NULL_HANDLE;
   VkDescriptorSet  dset  = VK_NULL_HANDLE;
 
+  DrawCtx ctx{};
+
   // Descriptor pool is created once at startup so that descriptor sets can
   // be freed and re-allocated without recreating the pool on swapchain
   // recreation.
@@ -196,6 +240,16 @@ int run() {
     dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &sizes;
     VK_CHECK(vkCreateDescriptorPool(device.device(), &dpci, nullptr, &dpool));
   }
+
+  auto destroy_swapchain_stack = [&]() {
+    for (auto v : ctx.depth_views) vkDestroyImageView(device.device(), v, nullptr);
+    ctx.depth_views.clear();
+    for (auto& di : ctx.depth_images) destroy_image2d(allocator.raw(), di);
+    ctx.depth_images.clear();
+    ctx.depth_first_use.clear();
+    commands.reset();
+    swapchain.reset();
+  };
 
   auto create_swapchain_stack = [&](uint32_t sw, uint32_t sh)
   {
@@ -214,6 +268,7 @@ int run() {
       pci.device = device.device();
       pci.pipeline_cache = device.pipeline_cache();
       pci.color_format = swapchain->image_format();
+      pci.depth_format = VK_FORMAT_D32_SFLOAT;
       pci.vs_spv = vs_path; pci.fs_spv = fs_path;
       pipeline = std::make_unique<TrianglePipeline>(pci);
     }
@@ -236,12 +291,32 @@ int run() {
     write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; write.descriptorCount = 1;
     write.pImageInfo = &ii;
     vkUpdateDescriptorSets(device.device(), 1, &write, 0, nullptr);
+
+    ctx.swap_images = &swapchain->images();
+    size_t count = swapchain->image_views().size();
+    ctx.depth_images.resize(count);
+    ctx.depth_views.resize(count);
+    ctx.depth_first_use.assign(count, true);
+    for (size_t i = 0; i < count; ++i) {
+      ctx.depth_images[i] = create_image2d(allocator.raw(), swapchain->extent().width,
+                                          swapchain->extent().height,
+                                          VK_FORMAT_D32_SFLOAT,
+                                          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+      VkImageViewCreateInfo vi{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+      vi.image = ctx.depth_images[i].image;
+      vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+      vi.format = VK_FORMAT_D32_SFLOAT;
+      vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+      vi.subresourceRange.levelCount = 1;
+      vi.subresourceRange.layerCount = 1;
+      VK_CHECK(vkCreateImageView(device.device(), &vi, nullptr, &ctx.depth_views[i]));
+    }
   };
 
   { auto fb = window->framebuffer_size();
     create_swapchain_stack(static_cast<uint32_t>(fb.first), static_cast<uint32_t>(fb.second)); }
 
-  DrawCtx ctx{}; ctx.pipe = pipeline.get(); ctx.dset = dset; ctx.vbo = vbo.buffer; ctx.ibo = ibo.buffer;
+  ctx.pipe = pipeline.get(); ctx.dset = dset; ctx.vbo = vbo.buffer; ctx.ibo = ibo.buffer;
   VkExtent2D last = swapchain->extent();
   using namespace std::chrono_literals;
 
@@ -254,7 +329,7 @@ int run() {
 
     if (want.width != last.width || want.height != last.height) {
       vkDeviceWaitIdle(device.device());
-      commands.reset(); swapchain.reset();
+      destroy_swapchain_stack();
       create_swapchain_stack(want.width, want.height);
       ctx.pipe = pipeline.get(); ctx.dset = dset;
       last = swapchain->extent();
@@ -275,7 +350,8 @@ int run() {
 
   vkDeviceWaitIdle(device.device());
 
-  commands.reset(); swapchain.reset(); pipeline.reset();
+  destroy_swapchain_stack();
+  pipeline.reset();
   if (dset) vkFreeDescriptorSets(device.device(), dpool, 1, &dset);
   if (dpool) vkDestroyDescriptorPool(device.device(), dpool, nullptr);
   vkDestroySampler(device.device(), sampler, nullptr);
