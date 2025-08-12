@@ -86,9 +86,11 @@ uint32_t VulkanCommands::acquire_record_present(
   VK_CHECK(vkBeginCommandBuffer(f.cmd, &bi));
 
   // Transition: PRESENT -> COLOR_ATTACHMENT_OPTIMAL (or UNDEFINED on first use)
-  VkImageMemoryBarrier to_color{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-  to_color.srcAccessMask = f.first_use ? 0 : VK_ACCESS_MEMORY_READ_BIT;
-  to_color.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+  VkImageMemoryBarrier2 to_color{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
+  to_color.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+  to_color.srcAccessMask = VK_ACCESS_2_NONE;
+  to_color.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+  to_color.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
   to_color.oldLayout = f.first_use ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
   to_color.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
   to_color.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -96,11 +98,10 @@ uint32_t VulkanCommands::acquire_record_present(
   to_color.image = swapchain_images[image_index];
   to_color.subresourceRange = full_color_range();
 
-  vkCmdPipelineBarrier(
-      f.cmd,
-      f.first_use ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-      0, 0, nullptr, 0, nullptr, 1, &to_color);
+  VkDependencyInfo dep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+  dep.imageMemoryBarrierCount = 1;
+  dep.pImageMemoryBarriers = &to_color;
+  vkCmdPipelineBarrier2(f.cmd, &dep);
 
   // User recording (dynamic rendering / draw calls etc.)
   if (recorder) {
@@ -113,9 +114,11 @@ uint32_t VulkanCommands::acquire_record_present(
   }
 
   // Transition back to PRESENT
-  VkImageMemoryBarrier to_present{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-  to_present.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-  to_present.dstAccessMask = 0;
+  VkImageMemoryBarrier2 to_present{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
+  to_present.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+  to_present.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+  to_present.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
+  to_present.dstAccessMask = VK_ACCESS_2_NONE;
   to_present.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
   to_present.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
   to_present.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -123,11 +126,9 @@ uint32_t VulkanCommands::acquire_record_present(
   to_present.image = swapchain_images[image_index];
   to_present.subresourceRange = full_color_range();
 
-  vkCmdPipelineBarrier(
-      f.cmd,
-      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-      0, 0, nullptr, 0, nullptr, 1, &to_present);
+  dep.imageMemoryBarrierCount = 1;
+  dep.pImageMemoryBarriers = &to_present;
+  vkCmdPipelineBarrier2(f.cmd, &dep);
 
   VK_CHECK(vkEndCommandBuffer(f.cmd));
   f.first_use = false;

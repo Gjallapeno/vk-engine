@@ -232,9 +232,11 @@ void upload_image2d(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
   VK_CHECK(vkBeginCommandBuffer(ctx.cmd, &bi));
 
   // layout transitions + copy
-  VkImageMemoryBarrier to_dst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-  to_dst.srcAccessMask = 0;
-  to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  VkImageMemoryBarrier2 to_dst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+  to_dst.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+  to_dst.srcAccessMask = VK_ACCESS_2_NONE;
+  to_dst.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+  to_dst.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
   to_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
   to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -242,9 +244,10 @@ void upload_image2d(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
   to_dst.image = dst.image;
   to_dst.subresourceRange = full_color(dst.mip_levels);
 
-  vkCmdPipelineBarrier(ctx.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
-                       nullptr, 1, &to_dst);
+  VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+  dep.imageMemoryBarrierCount = 1;
+  dep.pImageMemoryBarriers = &to_dst;
+  vkCmdPipelineBarrier2(ctx.cmd, &dep);
 
   VkBufferImageCopy region{};
   region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -257,9 +260,11 @@ void upload_image2d(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
   uint32_t mip_w = dst.width;
   uint32_t mip_h = dst.height;
   for (uint32_t i = 1; i < dst.mip_levels; ++i) {
-    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -270,9 +275,9 @@ void upload_image2d(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
     barrier.subresourceRange.levelCount = 1;
     barrier.subresourceRange.baseArrayLayer = 0;
     barrier.subresourceRange.layerCount = 1;
-    vkCmdPipelineBarrier(ctx.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
-                         nullptr, 1, &barrier);
+    dep.imageMemoryBarrierCount = 1;
+    dep.pImageMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(ctx.cmd, &dep);
 
     VkImageBlit blit{};
     blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -295,18 +300,22 @@ void upload_image2d(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
                    dst.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
                    VK_FILTER_LINEAR);
 
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    vkCmdPipelineBarrier(ctx.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr,
-                         0, nullptr, 1, &barrier);
+    dep.imageMemoryBarrierCount = 1;
+    dep.pImageMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(ctx.cmd, &dep);
   }
 
-  VkImageMemoryBarrier last{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-  last.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  last.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+  VkImageMemoryBarrier2 last{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+  last.srcStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;
+  last.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+  last.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+  last.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
   last.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
   last.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   last.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -317,9 +326,9 @@ void upload_image2d(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
   last.subresourceRange.levelCount = 1;
   last.subresourceRange.baseArrayLayer = 0;
   last.subresourceRange.layerCount = 1;
-  vkCmdPipelineBarrier(ctx.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
-                       nullptr, 1, &last);
+  dep.imageMemoryBarrierCount = 1;
+  dep.pImageMemoryBarriers = &last;
+  vkCmdPipelineBarrier2(ctx.cmd, &dep);
 
   VK_CHECK(vkEndCommandBuffer(ctx.cmd));
 
@@ -388,9 +397,11 @@ void upload_image3d(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   VK_CHECK(vkBeginCommandBuffer(ctx.cmd, &bi));
 
-  VkImageMemoryBarrier to_dst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-  to_dst.srcAccessMask = 0;
-  to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  VkImageMemoryBarrier2 to_dst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+  to_dst.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+  to_dst.srcAccessMask = VK_ACCESS_2_NONE;
+  to_dst.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+  to_dst.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
   to_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
   to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -399,9 +410,10 @@ void upload_image3d(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
   to_dst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
   to_dst.subresourceRange.levelCount = 1;
   to_dst.subresourceRange.layerCount = 1;
-  vkCmdPipelineBarrier(ctx.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
-                       nullptr, 1, &to_dst);
+  VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+  dep.imageMemoryBarrierCount = 1;
+  dep.pImageMemoryBarriers = &to_dst;
+  vkCmdPipelineBarrier2(ctx.cmd, &dep);
 
   VkBufferImageCopy region{};
   region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -412,9 +424,11 @@ void upload_image3d(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
   vkCmdCopyBufferToImage(ctx.cmd, stagingBuf, dst.image,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-  VkImageMemoryBarrier to_read{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-  to_read.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  to_read.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+  VkImageMemoryBarrier2 to_read{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+  to_read.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+  to_read.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+  to_read.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+  to_read.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
   to_read.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
   to_read.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   to_read.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -423,9 +437,9 @@ void upload_image3d(VmaAllocator alloc, TransferContext &ctx, VkQueue queue,
   to_read.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
   to_read.subresourceRange.levelCount = 1;
   to_read.subresourceRange.layerCount = 1;
-  vkCmdPipelineBarrier(ctx.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
-                       nullptr, 1, &to_read);
+  dep.imageMemoryBarrierCount = 1;
+  dep.pImageMemoryBarriers = &to_read;
+  vkCmdPipelineBarrier2(ctx.cmd, &dep);
 
   VK_CHECK(vkEndCommandBuffer(ctx.cmd));
 

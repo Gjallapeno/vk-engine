@@ -136,14 +136,19 @@ void VulkanDevice::create_logical(bool enable_validation) {
     VkPhysicalDeviceDynamicRenderingFeatures dyn{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES };
     dyn.dynamicRendering = VK_TRUE;
 
-    const char* kExts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    // Synchronization2 feature
+    VkPhysicalDeviceSynchronization2Features sync{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES };
+    sync.synchronization2 = VK_TRUE;
+    dyn.pNext = &sync;
+
+    const char* kExts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME };
 
     VkDeviceCreateInfo di{ VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
     di.pNext = &dyn;
     di.queueCreateInfoCount = static_cast<uint32_t>(qinfos.size());
     di.pQueueCreateInfos = qinfos.data();
     di.pEnabledFeatures = &feats;
-    di.enabledExtensionCount = 1;
+    di.enabledExtensionCount = 2;
     di.ppEnabledExtensionNames = kExts;
   
     VK_CHECK(vkCreateDevice(phys_, &di, nullptr, &dev_));

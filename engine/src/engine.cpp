@@ -174,12 +174,15 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   };
 
   begin_label("Voxel generation", kColorCompute);
-  VkImageMemoryBarrier pre[3]{{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER},
-                              {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER},
-                              {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}};
+  VkImageMemoryBarrier2 pre[3]{};
   for (int i = 0; i < 3; i++) {
-    pre[i].srcAccessMask = ctx->first_frame ? 0 : VK_ACCESS_SHADER_READ_BIT;
-    pre[i].dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    pre[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    pre[i].srcStageMask =
+        ctx->first_frame ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    pre[i].srcAccessMask =
+        ctx->first_frame ? VK_ACCESS_2_NONE : VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    pre[i].dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    pre[i].dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
     pre[i].oldLayout = ctx->first_frame
                            ? VK_IMAGE_LAYOUT_UNDEFINED
                            : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -191,11 +194,11 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   pre[0].image = ctx->occ_image;
   pre[1].image = ctx->mat_image;
   pre[2].image = ctx->occ_l1_image;
-  VkPipelineStageFlags srcStage = ctx->first_frame
-                                      ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
-                                      : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-  vkCmdPipelineBarrier(cmd, srcStage, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                       0, nullptr, 0, nullptr, 3, pre);
+
+  VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+  dep.imageMemoryBarrierCount = 3;
+  dep.pImageMemoryBarriers = pre;
+  vkCmdPipelineBarrier2(cmd, &dep);
 
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_pipe);
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_layout,
@@ -207,33 +210,25 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   end_label();
 
   begin_label("L1 build", kColorCompute);
-  // Transition L0 outputs for sampling and prepare L1 for writing
-  VkImageMemoryBarrier mid[3]{{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER},
-                              {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER},
-                              {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}};
-  for (int i = 0; i < 3; i++) {
+  // Transition L0 outputs for sampling
+  VkImageMemoryBarrier2 mid[2]{};
+  for (int i = 0; i < 2; i++) {
+    mid[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    mid[i].srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    mid[i].srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+    mid[i].dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    mid[i].dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    mid[i].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    mid[i].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     mid[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     mid[i].subresourceRange.levelCount = 1;
     mid[i].subresourceRange.layerCount = 1;
   }
   mid[0].image = ctx->occ_image;
-  mid[0].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-  mid[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-  mid[0].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-  mid[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   mid[1].image = ctx->mat_image;
-  mid[1].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-  mid[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-  mid[1].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-  mid[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-  mid[2].image = ctx->occ_l1_image;
-  mid[2].srcAccessMask = 0;
-  mid[2].dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-  mid[2].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-  mid[2].newLayout = VK_IMAGE_LAYOUT_GENERAL;
-  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0,
-                       nullptr, 3, mid);
+  dep.imageMemoryBarrierCount = 2;
+  dep.pImageMemoryBarriers = mid;
+  vkCmdPipelineBarrier2(cmd, &dep);
 
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_l1_pipe);
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -244,70 +239,61 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   gz = (ctx->dispatch_l1_dim.depth + 7) / 8;
   vkCmdDispatch(cmd, gx, gy, gz);
 
-  VkImageMemoryBarrier post[3]{{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER},
-                               {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER},
-                               {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}};
-  for (int i = 0; i < 3; i++) {
-    post[i].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    post[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    post[i].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    post[i].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    post[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    post[i].subresourceRange.levelCount = 1;
-    post[i].subresourceRange.layerCount = 1;
-  }
-  post[0].image = ctx->occ_image;
-  post[1].image = ctx->mat_image;
-  post[2].image = ctx->occ_l1_image;
-  post[2].srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-  post[2].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-  post[2].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
-                       nullptr, 3, post);
   end_label();
 
   begin_label("Geometry", kColorGraphics);
-  VkImageMemoryBarrier steps_pre{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-  steps_pre.srcAccessMask = ctx->first_frame ? 0 : VK_ACCESS_TRANSFER_WRITE_BIT;
-  steps_pre.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-  steps_pre.oldLayout =
-      ctx->first_frame ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
-  steps_pre.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-  steps_pre.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-  steps_pre.subresourceRange.levelCount = 1;
-  steps_pre.subresourceRange.layerCount = 1;
-  steps_pre.image = ctx->steps_image;
-  VkPipelineStageFlags stepsSrc = ctx->first_frame
-                                      ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
-                                      : VK_PIPELINE_STAGE_TRANSFER_BIT;
-  vkCmdPipelineBarrier(cmd, stepsSrc, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-                       0, nullptr, 0, nullptr, 1, &steps_pre);
 
-  // Prepare G-buffer images for color attachment writes
-  VkImageMemoryBarrier gpre[3]{{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER},
-                               {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER},
-                               {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}};
+  VkImageMemoryBarrier2 geom[5]{};
+
+  // occ_l1_image: compute write -> fragment sampled read
+  geom[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+  geom[0].srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+  geom[0].srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+  geom[0].dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+  geom[0].dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+  geom[0].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+  geom[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  geom[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  geom[0].subresourceRange.levelCount = 1;
+  geom[0].subresourceRange.layerCount = 1;
+  geom[0].image = ctx->occ_l1_image;
+
+  // steps image for fragment writes
+  geom[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+  geom[1].srcStageMask = ctx->first_frame ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+  geom[1].srcAccessMask = ctx->first_frame ? VK_ACCESS_2_NONE : VK_ACCESS_2_TRANSFER_WRITE_BIT;
+  geom[1].dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+  geom[1].dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+  geom[1].oldLayout = ctx->first_frame ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
+  geom[1].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+  geom[1].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  geom[1].subresourceRange.levelCount = 1;
+  geom[1].subresourceRange.layerCount = 1;
+  geom[1].image = ctx->steps_image;
+
+  // G-buffer images for color attachment writes
   for (int i = 0; i < 3; i++) {
-    gpre[i].srcAccessMask = ctx->first_frame ? 0 : VK_ACCESS_SHADER_READ_BIT;
-    gpre[i].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    gpre[i].oldLayout = ctx->first_frame
-                            ? VK_IMAGE_LAYOUT_UNDEFINED
-                            : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    gpre[i].newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    gpre[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    gpre[i].subresourceRange.levelCount = 1;
-    gpre[i].subresourceRange.layerCount = 1;
+    int idx = i + 2;
+    geom[idx].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    geom[idx].srcStageMask = ctx->first_frame ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    geom[idx].srcAccessMask = ctx->first_frame ? VK_ACCESS_2_NONE : VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    geom[idx].dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    geom[idx].dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    geom[idx].oldLayout = ctx->first_frame
+                              ? VK_IMAGE_LAYOUT_UNDEFINED
+                              : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    geom[idx].newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    geom[idx].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    geom[idx].subresourceRange.levelCount = 1;
+    geom[idx].subresourceRange.layerCount = 1;
   }
-  gpre[0].image = ctx->g_albedo;
-  gpre[1].image = ctx->g_normal;
-  gpre[2].image = ctx->g_depth;
-  VkPipelineStageFlags gpreSrc = ctx->first_frame
-                                     ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
-                                     : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-  vkCmdPipelineBarrier(cmd, gpreSrc,
-                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0,
-                       nullptr, 0, nullptr, 3, gpre);
+  geom[2].image = ctx->g_albedo;
+  geom[3].image = ctx->g_normal;
+  geom[4].image = ctx->g_depth;
+
+  dep.imageMemoryBarrierCount = 5;
+  dep.pImageMemoryBarriers = geom;
+  vkCmdPipelineBarrier2(cmd, &dep);
 
   // Geometry pass writing G-buffer
   VkRenderingAttachmentInfo gAtt[3]{
@@ -367,49 +353,24 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   stepsRange.levelCount = 1;
   stepsRange.layerCount = 1;
 
-  VkImageMemoryBarrier steps_to_copy{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-  steps_to_copy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-  steps_to_copy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+  VkImageMemoryBarrier2 steps_to_copy{};
+  steps_to_copy.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+  steps_to_copy.srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+  steps_to_copy.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+  steps_to_copy.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+  steps_to_copy.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
   steps_to_copy.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
   steps_to_copy.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
   steps_to_copy.subresourceRange = stepsRange;
   steps_to_copy.image = ctx->steps_image;
-  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
-                       nullptr, 1, &steps_to_copy);
 
-  VkBufferImageCopy bic{};
-  bic.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-  bic.imageSubresource.layerCount = 1;
-  bic.imageExtent = {ctx->steps_dim.width, ctx->steps_dim.height, 1};
-  vkCmdCopyImageToBuffer(cmd, ctx->steps_image,
-                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                         ctx->steps_buffer, 1, &bic);
-
-  VkImageMemoryBarrier steps_to_clear{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-  steps_to_clear.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-  steps_to_clear.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-  steps_to_clear.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-  steps_to_clear.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-  steps_to_clear.subresourceRange = stepsRange;
-  steps_to_clear.image = ctx->steps_image;
-  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
-                       nullptr, 1, &steps_to_clear);
-
-  VkClearColorValue zero{{0, 0, 0, 0}};
-  vkCmdClearColorImage(cmd, ctx->steps_image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1,
-                       &stepsRange);
-  end_label();
-
-  begin_label("Postprocess", kColorGraphics);
-  // Transition G-buffer for sampling
-  VkImageMemoryBarrier gpost[3]{{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER},
-                                {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER},
-                                {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}};
+  VkImageMemoryBarrier2 gpost[3]{};
   for (int i = 0; i < 3; i++) {
-    gpost[i].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    gpost[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    gpost[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    gpost[i].srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    gpost[i].srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    gpost[i].dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    gpost[i].dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
     gpost[i].oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     gpost[i].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     gpost[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -419,9 +380,40 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   gpost[0].image = ctx->g_albedo;
   gpost[1].image = ctx->g_normal;
   gpost[2].image = ctx->g_depth;
-  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
-                       nullptr, 3, gpost);
+
+  VkImageMemoryBarrier2 readback_barriers[4] = {steps_to_copy, gpost[0], gpost[1], gpost[2]};
+  dep.imageMemoryBarrierCount = 4;
+  dep.pImageMemoryBarriers = readback_barriers;
+  vkCmdPipelineBarrier2(cmd, &dep);
+
+  VkBufferImageCopy bic{};
+  bic.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  bic.imageSubresource.layerCount = 1;
+  bic.imageExtent = {ctx->steps_dim.width, ctx->steps_dim.height, 1};
+  vkCmdCopyImageToBuffer(cmd, ctx->steps_image,
+                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                         ctx->steps_buffer, 1, &bic);
+
+  VkImageMemoryBarrier2 steps_to_clear{};
+  steps_to_clear.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+  steps_to_clear.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+  steps_to_clear.srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+  steps_to_clear.dstStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
+  steps_to_clear.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+  steps_to_clear.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  steps_to_clear.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+  steps_to_clear.subresourceRange = stepsRange;
+  steps_to_clear.image = ctx->steps_image;
+  dep.imageMemoryBarrierCount = 1;
+  dep.pImageMemoryBarriers = &steps_to_clear;
+  vkCmdPipelineBarrier2(cmd, &dep);
+
+  VkClearColorValue zero{{0, 0, 0, 0}};
+  vkCmdClearColorImage(cmd, ctx->steps_image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1,
+                       &stepsRange);
+  end_label();
+
+  begin_label("Postprocess", kColorGraphics);
 
   // Lighting pass to final image
   VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
