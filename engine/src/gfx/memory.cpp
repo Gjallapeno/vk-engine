@@ -333,4 +333,103 @@ void destroy_transfer_context() {
   g_transfer = {};
 }
 
+Image3D create_image3d(VmaAllocator alloc, uint32_t w, uint32_t h, uint32_t d,
+                       VkFormat format, VkImageUsageFlags usage) {
+  Image3D img{};
+  img.width = w; img.height = h; img.depth = d;
+  VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+  ci.imageType = VK_IMAGE_TYPE_3D;
+  ci.format = format;
+  ci.extent = {w, h, d};
+  ci.mipLevels = 1;
+  ci.arrayLayers = 1;
+  ci.samples = VK_SAMPLE_COUNT_1_BIT;
+  ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+  ci.usage = usage | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  VmaAllocationCreateInfo aci{};
+  aci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+  VK_CHECK(vmaCreateImage(alloc, &ci, &aci, &img.image, &img.allocation, nullptr));
+  return img;
+}
+
+void destroy_image3d(VmaAllocator alloc, Image3D &img) {
+  if (img.image) {
+    vmaDestroyImage(alloc, img.image, img.allocation);
+    img = {};
+  }
+}
+
+void upload_image3d(VmaAllocator alloc, VkDevice device, uint32_t queue_family,
+                    VkQueue queue, const void *src, size_t src_bytes,
+                    const Image3D &dst) {
+  VkBuffer stagingBuf = VK_NULL_HANDLE; VmaAllocation stagingAlloc = nullptr; {
+    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bi.size = src_bytes; bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    VmaAllocationCreateInfo aci{}; aci.usage = VMA_MEMORY_USAGE_AUTO;
+    aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VmaAllocationInfo info{};
+    VK_CHECK(vmaCreateBuffer(alloc, &bi, &aci, &stagingBuf, &stagingAlloc, &info));
+    std::memcpy(info.pMappedData, src, src_bytes);
+  }
+
+  ensure_transfer(device, queue_family);
+  VK_CHECK(vkResetCommandPool(device, g_transfer.pool, 0));
+
+  VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+  bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  VK_CHECK(vkBeginCommandBuffer(g_transfer.cmd, &bi));
+
+  VkImageMemoryBarrier to_dst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+  to_dst.srcAccessMask = 0;
+  to_dst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  to_dst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  to_dst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  to_dst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  to_dst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  to_dst.image = dst.image;
+  to_dst.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  to_dst.subresourceRange.levelCount = 1;
+  to_dst.subresourceRange.layerCount = 1;
+  vkCmdPipelineBarrier(g_transfer.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                       nullptr, 1, &to_dst);
+
+  VkBufferImageCopy region{};
+  region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  region.imageSubresource.mipLevel = 0;
+  region.imageSubresource.baseArrayLayer = 0;
+  region.imageSubresource.layerCount = 1;
+  region.imageExtent = {dst.width, dst.height, dst.depth};
+  vkCmdCopyBufferToImage(g_transfer.cmd, stagingBuf, dst.image,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+  VkImageMemoryBarrier to_read{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+  to_read.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  to_read.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+  to_read.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  to_read.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  to_read.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  to_read.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  to_read.image = dst.image;
+  to_read.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  to_read.subresourceRange.levelCount = 1;
+  to_read.subresourceRange.layerCount = 1;
+  vkCmdPipelineBarrier(g_transfer.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
+                       nullptr, 1, &to_read);
+
+  VK_CHECK(vkEndCommandBuffer(g_transfer.cmd));
+
+  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+  si.commandBufferCount = 1; si.pCommandBuffers = &g_transfer.cmd;
+  VK_CHECK(vkResetFences(device, 1, &g_transfer.fence));
+  VK_CHECK(vkQueueSubmit(queue, 1, &si, g_transfer.fence));
+  VK_CHECK(vkWaitForFences(device, 1, &g_transfer.fence, VK_TRUE, UINT64_MAX));
+
+  vmaDestroyBuffer(alloc, stagingBuf, stagingAlloc);
+}
+
 } // namespace engine

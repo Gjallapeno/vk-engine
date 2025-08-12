@@ -66,6 +66,8 @@ struct CameraUBO {
   glm::vec2 resolution{0.0f};
   float     time = 0.0f;
   float     _pad = 0.0f; // std140 alignment
+  glm::vec4 world_min{-1.0f,-1.0f,-1.0f,0.0f};
+  glm::vec4 world_max{ 1.0f, 1.0f, 1.0f,0.0f};
 };
 
 static VkShaderModule load_module(VkDevice dev, const std::string& path) {
@@ -293,22 +295,27 @@ int run() {
   VkPipelineLayout comp_layout = VK_NULL_HANDLE;
   Buffer cam_buf = create_buffer(allocator.raw(), sizeof(CameraUBO),
                                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+  Image3D occ_img{};
+  VkImageView occ_view = VK_NULL_HANDLE;
   {
-    VkDescriptorPoolSize sizes[2]{};
+    VkDescriptorPoolSize sizes[3]{};
     sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; sizes[0].descriptorCount = 1;
     sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; sizes[1].descriptorCount = 1;
+    sizes[2].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; sizes[2].descriptorCount = 1;
     VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    dpci.maxSets = 1; dpci.poolSizeCount = 2; dpci.pPoolSizes = sizes;
+    dpci.maxSets = 1; dpci.poolSizeCount = 3; dpci.pPoolSizes = sizes;
     VK_CHECK(vkCreateDescriptorPool(device.device(), &dpci, nullptr, &comp_pool));
 
-    VkDescriptorSetLayoutBinding binds[2]{};
+    VkDescriptorSetLayoutBinding binds[3]{};
     binds[0].binding = 0; binds[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     binds[0].descriptorCount = 1; binds[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     binds[1].binding = 1; binds[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     binds[1].descriptorCount = 1; binds[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    binds[2].binding = 2; binds[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    binds[2].descriptorCount = 1; binds[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     VkDescriptorSetLayoutCreateInfo dlci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    dlci.bindingCount = 2; dlci.pBindings = binds;
+    dlci.bindingCount = 3; dlci.pBindings = binds;
     VK_CHECK(vkCreateDescriptorSetLayout(device.device(), &dlci, nullptr, &comp_dset_layout));
 
     VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
@@ -332,6 +339,39 @@ int run() {
     write.dstSet = comp_dset; write.dstBinding = 1; write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     write.descriptorCount = 1; write.pBufferInfo = &bi;
     vkUpdateDescriptorSets(device.device(), 1, &write, 0, nullptr);
+
+    const uint32_t N = 128;
+    std::vector<uint8_t> occ(N*N*N, 0);
+    for(uint32_t z=N/2; z<N; ++z)
+      for(uint32_t y=0; y<N; ++y)
+        for(uint32_t x=0; x<N; ++x)
+          occ[x + y*N + z*N*N] = 1;
+    uint32_t c0 = N/4; uint32_t c1 = c0 + N/8;
+    for(uint32_t z=c0; z<c1; ++z)
+      for(uint32_t y=c0; y<c1; ++y)
+        for(uint32_t x=c0; x<c1; ++x)
+          occ[x + y*N + z*N*N] = 1;
+
+    occ_img = create_image3d(allocator.raw(), N, N, N,
+                             VK_FORMAT_R8_UINT,
+                             VK_IMAGE_USAGE_SAMPLED_BIT);
+    upload_image3d(allocator.raw(), device.device(), device.graphics_family(),
+                   device.graphics_queue(), occ.data(), occ.size(), occ_img);
+    VkImageViewCreateInfo ovi{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    ovi.image = occ_img.image; ovi.viewType = VK_IMAGE_VIEW_TYPE_3D;
+    ovi.format = VK_FORMAT_R8_UINT;
+    ovi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    ovi.subresourceRange.levelCount = 1;
+    ovi.subresourceRange.layerCount = 1;
+    VK_CHECK(vkCreateImageView(device.device(), &ovi, nullptr, &occ_view));
+
+    VkDescriptorImageInfo oi{}; oi.sampler = sampler; oi.imageView = occ_view;
+    oi.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet wocc{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    wocc.dstSet = comp_dset; wocc.dstBinding = 2;
+    wocc.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wocc.descriptorCount = 1; wocc.pImageInfo = &oi;
+    vkUpdateDescriptorSets(device.device(), 1, &wocc, 0, nullptr);
   }
 
   std::unique_ptr<VulkanSwapchain>   swapchain;
@@ -538,6 +578,8 @@ int run() {
   if (comp_pipe) vkDestroyPipeline(device.device(), comp_pipe, nullptr);
   if (comp_layout) vkDestroyPipelineLayout(device.device(), comp_layout, nullptr);
   if (comp_dset_layout) vkDestroyDescriptorSetLayout(device.device(), comp_dset_layout, nullptr);
+  if (occ_view) vkDestroyImageView(device.device(), occ_view, nullptr);
+  destroy_image3d(allocator.raw(), occ_img);
   vkDestroySampler(device.device(), sampler, nullptr);
   destroy_buffer(allocator.raw(), cam_buf);
   destroy_buffer(allocator.raw(), ibo);
