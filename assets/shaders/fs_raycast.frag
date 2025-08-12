@@ -26,6 +26,8 @@ layout(set=0, binding=4) uniform usampler3D uOccTexL1;
 layout(set=0, binding=5, r32ui) writeonly uniform uimage2D stepsImg;
 
 const int STEPS_SCALE = 4;
+const int MAX_ITERS = 2048;
+const float T_MAX = 1e6;
 
 struct Ray { vec3 o; vec3 d; };
 
@@ -61,7 +63,7 @@ bool gridRaycastL0(Ray r, out ivec3 cell, out int hitFace, out float tHit, out i
     vec3 tMax = (next - pos) / r.d;
     vec3 tDelta = cellSize / abs(r.d);
     hitFace = -1;
-    for(int i=0;i<1024;i++){
+    for(int i=0; i<MAX_ITERS && t <= T_MAX; ++i){
         if(any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, vox.dim))) break;
         steps++;
         if(texelFetch(uOccTex, cell, 0).r > 0u){ tHit = t; return true; }
@@ -113,7 +115,8 @@ bool gridRaycast(Ray r, out ivec3 cell, out int hitFace, out float tHit, out int
             float tLocal; int s0;
             bool hit = gridRaycastL0(r2, cell, hitFace, tLocal, s0);
             stepsL0 += s0;
-            if(hit){ tHit = t + tLocal; return true; } else return false;
+            if(hit){ tHit = t + tLocal; return true; }
+            // continue traversing L1 when L0 misses
         }
         stepsL1++;
         if(tMax.x < tMax.y){
@@ -155,8 +158,10 @@ void main() {
         depth = t;
     }
     int totalSteps = steps0 + steps1;
+    #ifdef LOG_STEPS
     ivec2 coord = ivec2(gl_FragCoord.xy) / STEPS_SCALE;
     imageStore(stepsImg, coord, uvec4(uint(totalSteps),0,0,0));
+    #endif
     vec3 color = albedo;
     if(cam.debugLevel > 0.5) color = (steps0 > 0) ? vec3(0,1,0) : vec3(1,0,0);
     if(cam.debugSteps > 0.5) color = vec3(float(totalSteps) * 0.02);
