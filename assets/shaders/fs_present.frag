@@ -15,6 +15,7 @@ layout(set=0, binding=1, std140) uniform VoxelAABB {
 } vox;
 
 layout(set=0, binding=2) uniform usampler3D uOccTex;
+layout(set=0, binding=3) uniform usampler3D uMatTex;
 
 struct Ray { vec3 o; vec3 d; };
 
@@ -27,7 +28,7 @@ Ray makeRay(vec2 p) {
     return Ray(ro, rd);
 }
 
-bool gridRaycast(Ray r, out int hitFace) {
+bool gridRaycast(Ray r, out ivec3 cell, out int hitFace) {
     vec3 invD = 1.0 / r.d;
     vec3 t0s = (vox.min - r.o) * invD;
     vec3 t1s = (vox.max - r.o) * invD;
@@ -40,7 +41,7 @@ bool gridRaycast(Ray r, out int hitFace) {
     vec3 pos = r.o + t * r.d;
 
     vec3 cellf = (pos - vox.min) / (vox.max - vox.min) * vec3(vox.dim);
-    ivec3 cell = ivec3(clamp(floor(cellf), vec3(0.0), vec3(vox.dim) - vec3(1.0)));
+    cell = ivec3(clamp(floor(cellf), vec3(0.0), vec3(vox.dim) - vec3(1.0)));
 
     ivec3 step = ivec3(greaterThan(r.d, vec3(0.0))) * 2 - ivec3(1);
     vec3 cellSize = (vox.max - vox.min) / vec3(vox.dim);
@@ -70,15 +71,13 @@ bool gridRaycast(Ray r, out int hitFace) {
 
 void main() {
     Ray r = makeRay(gl_FragCoord.xy);
-    int face;
+    ivec3 cell; int face;
     vec3 col = vec3(0.0);
-    if (gridRaycast(r, face)) {
-        const vec3 cols[6] = vec3[6](
-            vec3(1,0,0), vec3(0,1,0),
-            vec3(0,0,1), vec3(1,1,0),
-            vec3(1,0,1), vec3(0,1,1)
-        );
-        col = cols[face];
+    if (gridRaycast(r, cell, face)) {
+        uint m = texelFetch(uMatTex, cell, 0).r;
+        if(m == 1u) col = vec3(0.55,0.27,0.07); // terrain
+        else if(m == 2u) col = vec3(0.1,0.8,0.1); // tree
+        else col = vec3(1.0);
     }
     outColor = vec4(col, 1.0);
 }
