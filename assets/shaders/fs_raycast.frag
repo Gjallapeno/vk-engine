@@ -39,14 +39,11 @@ const vec3 N[6] = vec3[6](
     vec3( 0,0,1), vec3( 0,0,-1)
 );
 
-const vec3 ALBEDO[7] = vec3[7](
-    vec3(1.0),                   // 0 empty fallback
-    vec3(0.55,0.27,0.07),        // 1 dirt
-    vec3(0.10,0.80,0.10),        // 2 foliage
-    vec3(0.50,0.50,0.50),        // 3 rock
-    vec3(0.22,0.74,0.18),        // 4 grass
-    vec3(0.13,0.55,0.13),        // 5 tree
-    vec3(0.95,0.40,0.70)         // 6 flower
+const vec3 ALBEDO[4] = vec3[4](
+    vec3(1.0),
+    vec3(0.55,0.27,0.07),
+    vec3(0.1,0.8,0.1),
+    vec3(0.5,0.5,0.5)
 );
 
 struct Ray { vec3 o; vec3 d; };
@@ -58,20 +55,6 @@ Ray makeRay(vec2 p) {
     vec3 ro = h0.xyz / h0.w;
     vec3 rd = normalize(h1.xyz / h1.w - ro);
     return Ray(ro, rd);
-}
-
-// Fetch occupancy/material in the atlas given world cell coordinates
-bool fetchOccL0(ivec3 worldCell, out uint mat) {
-    const int B = 32;
-    ivec3 brickCoord = worldCell / B;
-    ivec3 local      = worldCell - brickCoord * B;
-    uint atlasIdx = texelFetch(uBrickPtrL2, brickCoord, 0).r;
-    if (atlasIdx == 0xFFFFFFFFu) { mat = 0u; return false; }
-    int zSlice = int(atlasIdx) * B + local.z;
-    ivec3 atlasP = ivec3(local.x, local.y, zSlice);
-    uint occ = texelFetch(uOccTex, atlasP, 0).r;
-    mat = texelFetch(uMatTex, atlasP, 0).r;
-    return occ > 0u;
 }
 
 // Fine DDA on the full-resolution voxel grid
@@ -98,21 +81,17 @@ bool gridRaycastL0(Ray r, vec3 invD, out ivec3 cell, out int hitFace, out float 
     vec3 tMax = (next - pos) * invD;
     vec3 tDelta = cellSize * abs(invD);
     hitFace = -1;
-    int maxSteps = vox.dim.x + vox.dim.y + vox.dim.z;
+    int maxSteps = int(dot(vec3(vox.dim), vec3(1)));
     for(int i=0;i<maxSteps;i++){
         if(any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, vox.dim))) break;
-
+        steps++;
+        if(texelFetch(uOccTex, cell, 0).r > 0u){ tHit = t; return true; }
         int a = (tMax.x < tMax.y) ? 0 : 1;
         a = (tMax[a] < tMax.z) ? a : 2;
         cell[a] += step[a];
         t       = tMax[a];
         tMax[a] += tDelta[a];
-        hitFace = (step[a] > 0) ? (a*2+1) : (a*2);
-        steps++;
-
-        if(any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, vox.dim))) break;
-        uint dummy;
-        if(fetchOccL0(cell, dummy)){ tHit = t; return true; }
+        hitFace = (step[a] > 0) ? (a*2) : (a*2+1);
     }
     return false;
 }
@@ -121,7 +100,7 @@ bool gridRaycastL0(Ray r, vec3 invD, out ivec3 cell, out int hitFace, out float 
 bool gridRaycastL1(Ray r, out ivec3 cell, out int hitFace, out float tHit, out int stepsL1, out int stepsL0) {
     stepsL1 = 0;
     stepsL0 = 0;
-    vec3 invD = 1.0 / (r.d + mix(vec3(-1e-8), vec3(1e-8), greaterThanEqual(r.d, vec3(0.0))));
+    vec3 invD = 1.0 / r.d;
     vec3 t0s = (vox.min - r.o) * invD;
     vec3 t1s = (vox.max - r.o) * invD;
     vec3 tsm = min(t0s, t1s);
@@ -144,19 +123,13 @@ bool gridRaycastL1(Ray r, out ivec3 cell, out int hitFace, out float tHit, out i
     int maxSteps = int(dot(vec3(dim1), vec3(1)));
     for(int i=0;i<maxSteps;i++){
         if(any(lessThan(cell1, ivec3(0))) || any(greaterThanEqual(cell1, dim1))) break;
-
-        bool coarseOccupied = texelFetch(uOccTexL1, cell1, 0).r > 0u;
-        if(coarseOccupied){
+        if(texelFetch(uOccTexL1, cell1, 0).r > 0u){
             Ray r2; r2.o = r.o + t * r.d; r2.d = r.d;
             float tLocal; int s0;
-            if(gridRaycastL0(r2, invD, cell, hitFace, tLocal, s0)){
-                stepsL0 += s0;
-                tHit = t + tLocal;
-                return true;
-            }
+            bool hit = gridRaycastL0(r2, invD, cell, hitFace, tLocal, s0);
             stepsL0 += s0;
+            if(hit){ tHit = t + tLocal; return true; } else return false;
         }
-
         stepsL1++;
         int a = (tMax.x < tMax.y) ? 0 : 1;
         a = (tMax[a] < tMax.z) ? a : 2;
@@ -170,7 +143,7 @@ bool gridRaycastL1(Ray r, out ivec3 cell, out int hitFace, out float tHit, out i
 // Traverse coarse L2 occupancy, descend to L1/L0 bricks
 bool gridRaycastL2(Ray r, out ivec3 cell, out int hitFace, out float tHit, out int stepsL2, out int stepsL1, out int stepsL0) {
     stepsL2 = 0; stepsL1 = 0; stepsL0 = 0;
-    vec3 invD = 1.0 / (r.d + mix(vec3(-1e-8), vec3(1e-8), greaterThanEqual(r.d, vec3(0.0))));
+    vec3 invD = 1.0 / r.d;
     vec3 t0s = (vox.min - r.o) * invD;
     vec3 t1s = (vox.max - r.o) * invD;
     vec3 tsm = min(t0s, t1s);
@@ -193,19 +166,14 @@ bool gridRaycastL2(Ray r, out ivec3 cell, out int hitFace, out float tHit, out i
     int maxSteps = int(dot(vec3(dim2), vec3(1)));
     for(int i=0;i<maxSteps;i++){
         if(any(lessThan(cell2, ivec3(0))) || any(greaterThanEqual(cell2, dim2))) break;
-
-        bool coarseOccupied = texelFetch(uOccTexL2, cell2, 0).r > 0u;
-        if(coarseOccupied){
+        if(texelFetch(uOccTexL2, cell2, 0).r > 0u){
+            uint brick = texelFetch(uBrickPtrL2, cell2, 0).r;
             Ray r2; r2.o = r.o + t * r.d; r2.d = r.d;
             float tLocal; int s1; int s0;
-            if(gridRaycastL1(r2, cell, hitFace, tLocal, s1, s0)){
-                stepsL1 += s1; stepsL0 += s0;
-                tHit = t + tLocal;
-                return true;
-            }
+            bool hit = gridRaycastL1(r2, cell, hitFace, tLocal, s1, s0);
             stepsL1 += s1; stepsL0 += s0;
+            if(hit){ tHit = t + tLocal; return true; } else return false;
         }
-
         stepsL2++;
         int a = (tMax.x < tMax.y) ? 0 : 1;
         a = (tMax[a] < tMax.z) ? a : 2;
@@ -223,9 +191,8 @@ void main() {
     vec3 normal = vec3(0.0);
     float depth = 0.0;
     if (gridRaycastL2(r, cell, face, t, steps2, steps1, steps0)) {
-        uint m;
-        fetchOccL0(cell, m);
-        albedo = ALBEDO[int(clamp(m, 0u, 6u))];
+        uint m = texelFetch(uMatTex, cell, 0).r;
+        albedo = ALBEDO[m <= 3u ? int(m) : 0];
         normal = (face >= 0) ? N[face] : vec3(0);
         depth = t;
     }
