@@ -251,6 +251,11 @@ struct BrickManager {
   VkImage index_image() const { return index_img.image; }
 };
 
+struct BrickParams {
+  glm::ivec3 brickCoord{0};
+  int brickIndex = 0;
+};
+
 struct DrawCtx {
   RayPipeline *ray_pipe = nullptr;
   VkDescriptorSet ray_dset = VK_NULL_HANDLE;
@@ -262,6 +267,7 @@ struct DrawCtx {
   VkPipeline comp_l1_pipe = VK_NULL_HANDLE;
   VkPipelineLayout comp_l1_layout = VK_NULL_HANDLE;
   std::vector<VkDescriptorSet> comp_l1_sets;
+  std::vector<BrickParams> brick_params; // per-brick push constants
   VkImage occ_image = VK_NULL_HANDLE;
   VkImage mat_image = VK_NULL_HANDLE;
   VkImage occ_l1_image = VK_NULL_HANDLE;
@@ -346,10 +352,10 @@ struct VoxParams {
   int op = 0;
   int noiseSeed = 0;
   int material = 0;
-  glm::ivec3 regionMin{0};
-  int pad5 = 0;
-  glm::ivec3 regionMax{0};
   float terrainFreq = 0.0f;
+  float grassDensity = 0.0f;
+  float treeDensity = 0.0f;
+  float flowerDensity = 0.0f;
 };
 
 struct BuildOccParams {
@@ -428,7 +434,11 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   uint32_t gx = (ctx->dispatch_dim.width + 7) / 8;
   uint32_t gy = (ctx->dispatch_dim.height + 7) / 8;
   uint32_t gz = (ctx->dispatch_dim.depth + 7) / 8;
-  vkCmdDispatch(cmd, gx, gy, gz);
+  for (const auto &bp : ctx->brick_params) {
+    vkCmdPushConstants(cmd, ctx->comp_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                       sizeof(BrickParams), &bp);
+    vkCmdDispatch(cmd, gx, gy, gz);
+  }
   end_label();
 
   begin_label("Build occupancy", kColorCompute);
@@ -934,11 +944,18 @@ int run() {
     VK_CHECK(vkCreateDescriptorSetLayout(device.device(), &dlci, nullptr,
                                          comp_dsl.init(device.device())));
 
+    VkPushConstantRange pcr{};
+    pcr.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pcr.offset = 0;
+    pcr.size = sizeof(BrickParams);
+
     VkPipelineLayoutCreateInfo plci{
         VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     plci.setLayoutCount = 1;
     VkDescriptorSetLayout comp_dsl_handle = comp_dsl.get();
     plci.pSetLayouts = &comp_dsl_handle;
+    plci.pushConstantRangeCount = 1;
+    plci.pPushConstantRanges = &pcr;
     VK_CHECK(vkCreatePipelineLayout(device.device(), &plci, nullptr,
                                     comp_layout.init(device.device())));
 
@@ -1457,12 +1474,16 @@ int run() {
   ctx.occ_l1_layout = VK_IMAGE_LAYOUT_UNDEFINED;
   ctx.occ_l2_layout = VK_IMAGE_LAYOUT_UNDEFINED;
   ctx.brick_ptr_image = brick_mgr.index_image();
-  ctx.occ_dim = {N, N, N};
-  ctx.dispatch_dim = {N, N, N};
-  ctx.occ_l1_dim = {N / 4, N / 4, N / 4};
-  ctx.dispatch_l1_dim = {N / 4, N / 4, N / 4};
-  ctx.occ_l2_dim = {N / 32, N / 32, N / 32};
-  ctx.dispatch_l2_dim = {N / 32, N / 32, N / 32};
+  ctx.occ_dim = {brick_mgr.brick_size, brick_mgr.brick_size,
+                 brick_mgr.brick_size * brick_mgr.max_bricks};
+  ctx.dispatch_dim = {brick_mgr.brick_size, brick_mgr.brick_size,
+                      brick_mgr.brick_size};
+  ctx.occ_l1_dim = {ctx.occ_dim.width / 4, ctx.occ_dim.height / 4,
+                    ctx.occ_dim.depth / 4};
+  ctx.dispatch_l1_dim = ctx.occ_l1_dim;
+  ctx.occ_l2_dim = {ctx.occ_dim.width / 32, ctx.occ_dim.height / 32,
+                    ctx.occ_dim.depth / 32};
+  ctx.dispatch_l2_dim = ctx.occ_l2_dim;
   ctx.first_frame = true;
   VkExtent2D last = swapchain->extent();
   float total_time = 0.0f;
@@ -1635,8 +1656,9 @@ int run() {
                   &ubo, sizeof(ubo));
 
     VoxParams vparams{};
-    vparams.dim = {static_cast<int>(N), static_cast<int>(N),
-                   static_cast<int>(N)};
+    vparams.dim = {static_cast<int>(brick_mgr.brick_size),
+                   static_cast<int>(brick_mgr.brick_size),
+                   static_cast<int>(brick_mgr.brick_size)};
     vparams.frame = frame_counter++;
     vparams.volMin = {0.0f, 0.0f, 0.0f};
     vparams.volMax = {static_cast<float>(N), static_cast<float>(N),
@@ -1649,10 +1671,10 @@ int run() {
     vparams.op = vox_op;
     vparams.noiseSeed = noise_seed;
     vparams.material = 1;
-    vparams.regionMin = {0, 0, 0};
-    vparams.regionMax = {static_cast<int>(N), static_cast<int>(N),
-                         static_cast<int>(N)};
     vparams.terrainFreq = 0.05f;
+    vparams.grassDensity = 0.5f;
+    vparams.treeDensity = 0.05f;
+    vparams.flowerDensity = 0.2f;
 
     BrickManager::BrickKey cam_key{
         static_cast<int>(std::floor(cam.position.x / brick_mgr.brick_size)),
@@ -1663,10 +1685,15 @@ int run() {
     upload_buffer(allocator.raw(), transfer, device.graphics_queue(),
                   vox_params_buf, &vparams, sizeof(vparams));
 
-    ctx.dispatch_dim = {
-        static_cast<uint32_t>(vparams.regionMax.x - vparams.regionMin.x),
-        static_cast<uint32_t>(vparams.regionMax.y - vparams.regionMin.y),
-        static_cast<uint32_t>(vparams.regionMax.z - vparams.regionMin.z)};
+    ctx.dispatch_dim = {brick_mgr.brick_size, brick_mgr.brick_size,
+                        brick_mgr.brick_size};
+    ctx.brick_params.clear();
+    for (const auto &kv : brick_mgr.bricks) {
+      BrickParams bp{};
+      bp.brickCoord = {kv.first.x, kv.first.y, kv.first.z};
+      bp.brickIndex = static_cast<int>(kv.second.index);
+      ctx.brick_params.push_back(bp);
+    }
 
     commands->acquire_record_present(
         swapchain->vk(), const_cast<VkImage *>(swapchain->images().data()),
