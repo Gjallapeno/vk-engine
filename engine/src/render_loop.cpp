@@ -2,6 +2,7 @@
 #include <engine/config.hpp>
 #include <engine/gfx/present_pipeline.hpp>
 #include <engine/gfx/ray_pipeline.hpp>
+#include <engine/gfx/vulkan_instance.hpp>
 
 namespace engine {
 
