@@ -79,6 +79,8 @@ struct DrawCtx {
   VkImage occ_image = VK_NULL_HANDLE;
   VkImage mat_image = VK_NULL_HANDLE;
   VkImage occ_l1_image = VK_NULL_HANDLE;
+  VkImage occ_l2_image = VK_NULL_HANDLE;
+  VkImage brick_ptr_image = VK_NULL_HANDLE;
   VkImage g_albedo = VK_NULL_HANDLE;
   VkImage g_normal = VK_NULL_HANDLE;
   VkImage g_depth = VK_NULL_HANDLE;
@@ -94,6 +96,8 @@ struct DrawCtx {
   VkExtent3D dispatch_dim{0, 0, 0};
   VkExtent3D occ_l1_dim{0, 0, 0};
   VkExtent3D dispatch_l1_dim{0, 0, 0};
+  VkExtent3D occ_l2_dim{0, 0, 0};
+  VkExtent3D dispatch_l2_dim{0, 0, 0};
   bool first_frame = true;
 };
 
@@ -119,6 +123,10 @@ struct VoxelAABB {
   int pad3 = 0;
   glm::vec3 occL1CellSize{0.0f};
   float pad4 = 0.0f;
+  glm::ivec3 occL2Dim{0};
+  int pad5 = 0;
+  glm::vec3 occL2CellSize{0.0f};
+  float pad6 = 0.0f;
 };
 
 struct VoxParams {
@@ -551,13 +559,20 @@ int run() {
                                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
   const uint32_t N = 128;
   const uint32_t N1 = N / 4;
+  const uint32_t N2 = N / 32;
   Image3D occ_img{};
   Image3D mat_img{};
   Image3D occ_l1_img{};
+  Image3D occ_l2_img{};
+  Image3D brick_img{};
   UniqueImageView occ_view;
   UniqueImageView occ_storage_view;
   UniqueImageView occ_l1_view;
   UniqueImageView occ_l1_storage_view;
+  UniqueImageView occ_l2_view;
+  UniqueImageView occ_l2_storage_view;
+  UniqueImageView brick_view;
+  UniqueImageView brick_storage_view;
   UniqueImageView mat_view;
   UniqueImageView mat_storage_view;
   {
@@ -585,10 +600,31 @@ int run() {
     VK_CHECK(vkCreateImageView(device.device(), &ovi, nullptr,
                                occ_l1_storage_view.init(device.device())));
 
+    occ_l2_img =
+        create_image3d(allocator.raw(), N2, N2, N2, VK_FORMAT_R8_UINT,
+                       VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    ovi.image = occ_l2_img.image;
+    ovi.format = VK_FORMAT_R8_UINT;
+    VK_CHECK(vkCreateImageView(device.device(), &ovi, nullptr,
+                               occ_l2_view.init(device.device())));
+    VK_CHECK(vkCreateImageView(device.device(), &ovi, nullptr,
+                               occ_l2_storage_view.init(device.device())));
+
+    brick_img =
+        create_image3d(allocator.raw(), N2, N2, N2, VK_FORMAT_R32_UINT,
+                       VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    ovi.image = brick_img.image;
+    ovi.format = VK_FORMAT_R32_UINT;
+    VK_CHECK(vkCreateImageView(device.device(), &ovi, nullptr,
+                               brick_view.init(device.device())));
+    VK_CHECK(vkCreateImageView(device.device(), &ovi, nullptr,
+                               brick_storage_view.init(device.device())));
+
     mat_img =
         create_image3d(allocator.raw(), N, N, N, VK_FORMAT_R8_UINT,
                        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
     ovi.image = mat_img.image;
+    ovi.format = VK_FORMAT_R8_UINT;
     VK_CHECK(
         vkCreateImageView(device.device(), &ovi, nullptr, mat_view.init(device.device())));
     VK_CHECK(vkCreateImageView(device.device(), &ovi, nullptr,
@@ -604,6 +640,9 @@ int run() {
   vubo.occL1Dim = {static_cast<int>(N1), static_cast<int>(N1), static_cast<int>(N1)};
   vubo.occL1CellSize =
       (vubo.max - vubo.min) / glm::vec3(vubo.occL1Dim);
+  vubo.occL2Dim = {static_cast<int>(N2), static_cast<int>(N2), static_cast<int>(N2)};
+  vubo.occL2CellSize =
+      (vubo.max - vubo.min) / glm::vec3(vubo.occL2Dim);
   upload_buffer(allocator.raw(), transfer, device.graphics_queue(), vox_buf,
                 &vubo, sizeof(vubo));
 
@@ -957,11 +996,19 @@ int run() {
     occ_l1_info.sampler = nearest_sampler.get();
     occ_l1_info.imageView = occ_l1_view.get();
     occ_l1_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorImageInfo occ_l2_info{};
+    occ_l2_info.sampler = nearest_sampler.get();
+    occ_l2_info.imageView = occ_l2_view.get();
+    occ_l2_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorImageInfo brick_info{};
+    brick_info.sampler = nearest_sampler.get();
+    brick_info.imageView = brick_view.get();
+    brick_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkDescriptorImageInfo steps_info{};
     steps_info.imageView = steps_view.get();
     steps_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-    VkWriteDescriptorSet rwrites[6]{};
+    VkWriteDescriptorSet rwrites[8]{};
     rwrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     rwrites[0].dstSet = ray_dset;
     rwrites[0].dstBinding = 0;
@@ -998,7 +1045,19 @@ int run() {
     rwrites[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     rwrites[5].descriptorCount = 1;
     rwrites[5].pImageInfo = &steps_info;
-    vkUpdateDescriptorSets(device.device(), 6, rwrites, 0, nullptr);
+    rwrites[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    rwrites[6].dstSet = ray_dset;
+    rwrites[6].dstBinding = 6;
+    rwrites[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    rwrites[6].descriptorCount = 1;
+    rwrites[6].pImageInfo = &occ_l2_info;
+    rwrites[7].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    rwrites[7].dstSet = ray_dset;
+    rwrites[7].dstBinding = 7;
+    rwrites[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    rwrites[7].descriptorCount = 1;
+    rwrites[7].pImageInfo = &brick_info;
+    vkUpdateDescriptorSets(device.device(), 8, rwrites, 0, nullptr);
 
     g_albedo_img = create_image2d(
         allocator.raw(), rw, rh, VK_FORMAT_R8G8B8A8_UNORM,
@@ -1105,10 +1164,14 @@ int run() {
   ctx.occ_image = occ_img.image;
   ctx.mat_image = mat_img.image;
   ctx.occ_l1_image = occ_l1_img.image;
+  ctx.occ_l2_image = occ_l2_img.image;
+  ctx.brick_ptr_image = brick_img.image;
   ctx.occ_dim = {N, N, N};
   ctx.dispatch_dim = {N, N, N};
   ctx.occ_l1_dim = {N / 4, N / 4, N / 4};
   ctx.dispatch_l1_dim = {N / 4, N / 4, N / 4};
+  ctx.occ_l2_dim = {N / 32, N / 32, N / 32};
+  ctx.dispatch_l2_dim = {N / 32, N / 32, N / 32};
   ctx.first_frame = true;
   VkExtent2D last = swapchain->extent();
   float total_time = 0.0f;
@@ -1345,11 +1408,17 @@ int run() {
   occ_view.reset();
   occ_l1_storage_view.reset();
   occ_l1_view.reset();
+  occ_l2_storage_view.reset();
+  occ_l2_view.reset();
+  brick_storage_view.reset();
+  brick_view.reset();
   mat_storage_view.reset();
   mat_view.reset();
 
   destroy_image3d(allocator.raw(), occ_img);
   destroy_image3d(allocator.raw(), occ_l1_img);
+  destroy_image3d(allocator.raw(), occ_l2_img);
+  destroy_image3d(allocator.raw(), brick_img);
   destroy_image3d(allocator.raw(), mat_img);
   destroy_buffer(allocator.raw(), cam_buf);
   destroy_buffer(allocator.raw(), vox_buf);

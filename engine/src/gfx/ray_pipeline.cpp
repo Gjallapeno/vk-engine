@@ -17,7 +17,7 @@ VkShaderModule RayPipeline::load_module(const std::string& path) {
 RayPipeline::RayPipeline(const RayPipelineCreateInfo& ci)
   : dev_(ci.device) {
   // Descriptor set layout for camera, voxel AABB and voxel textures
-  VkDescriptorSetLayoutBinding binds[6]{};
+  VkDescriptorSetLayoutBinding binds[8]{};
   binds[0].binding = 0;
   binds[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
   binds[0].descriptorCount = 1;
@@ -48,8 +48,18 @@ RayPipeline::RayPipeline(const RayPipelineCreateInfo& ci)
   binds[5].descriptorCount = 1;
   binds[5].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
+  binds[6].binding = 6;
+  binds[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  binds[6].descriptorCount = 1;
+  binds[6].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+  binds[7].binding = 7;
+  binds[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  binds[7].descriptorCount = 1;
+  binds[7].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
   VkDescriptorSetLayoutCreateInfo dlci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-  dlci.bindingCount = 6; dlci.pBindings = binds;
+  dlci.bindingCount = 8; dlci.pBindings = binds;
   VK_CHECK(vkCreateDescriptorSetLayout(dev_, &dlci, nullptr, &dset_layout_));
 
   VkPipelineLayoutCreateInfo lci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
