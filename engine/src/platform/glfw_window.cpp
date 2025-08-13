@@ -3,17 +3,17 @@
 #include <GLFW/glfw3.h>
 #include <stdexcept>
 #include <vector>
+#include "glfw_context.hpp"
 
 namespace engine {
 
 class GlfwWindow final : public IWindow {
 public:
-  explicit GlfwWindow(const WindowDesc& d) {
-    if (!glfwInit()) throw std::runtime_error("GLFW init failed");
+  explicit GlfwWindow(const WindowDesc& d) : ctx_() {
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, d.resizable ? GLFW_TRUE : GLFW_FALSE);
     handle_ = glfwCreateWindow((int)d.width, (int)d.height, d.title.c_str(), nullptr, nullptr);
-    if (!handle_) { glfwTerminate(); throw std::runtime_error("GLFW window creation failed"); }
+    if (!handle_) throw std::runtime_error("GLFW window creation failed");
 
     glfwSetFramebufferSizeCallback(handle_, [](GLFWwindow*, int x, int y){
       spdlog::trace("[event] framebuffer resize: {}x{}", x, y);
@@ -30,7 +30,6 @@ public:
     if (handle_) {
       spdlog::info("Destroying window");
       glfwDestroyWindow(handle_);
-      glfwTerminate();
     }
   }
 
@@ -43,6 +42,7 @@ public:
   void* native_handle() const override { return handle_; }
 
 private:
+  GlfwContext ctx_;
   GLFWwindow* handle_ = nullptr;
 };
 
@@ -51,6 +51,7 @@ std::unique_ptr<IWindow> create_window(const WindowDesc& desc) {
 }
 
 std::vector<const char*> platform_required_instance_extensions() {
+  GlfwContext ctx;
   uint32_t count = 0;
   const char** ext = glfwGetRequiredInstanceExtensions(&count);
   std::vector<const char*> out;
