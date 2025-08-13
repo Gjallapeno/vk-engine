@@ -1,5 +1,8 @@
 add_library(engine STATIC
   src/engine.cpp
+  src/brick_manager.cpp
+  src/render_loop.cpp
+  src/resource_setup.cpp
   src/camera.cpp
   src/core/log.cpp
   src/core/vk_checks.cpp
