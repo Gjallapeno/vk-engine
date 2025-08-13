@@ -81,8 +81,8 @@ struct BrickManager {
   struct BrickKeyHash {
     size_t operator()(const BrickKey &k) const noexcept {
       size_t h = std::hash<int>()(k.x);
-      h ^= std::hash<int>()(k.y + 0x9e3779b9 + (h << 6) + (h >> 2));
-      h ^= std::hash<int>()(k.z + 0x9e3779b9 + (h << 6) + (h >> 2));
+      h ^= std::hash<int>()(k.y) + 0x9e3779b9 + (h << 6) + (h >> 2);
+      h ^= std::hash<int>()(k.z) + 0x9e3779b9 + (h << 6) + (h >> 2);
       return h;
     }
   };
