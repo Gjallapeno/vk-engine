@@ -46,6 +46,30 @@ const vec3 ALBEDO[4] = vec3[4](
     vec3(0.5,0.5,0.5)
 );
 
+const int BRICK = 32;                      // matches brick_mgr.brick_size
+const uint INVALID = 0xFFFFFFFFu;
+
+bool atlasFetch(ivec3 worldCell, out uint matOut) {
+    // World brick coord + local voxel
+    ivec3 b  = worldCell / BRICK;
+    ivec3 lc = worldCell - b * BRICK;
+
+    // Look up atlas slot (same texture you already bind at binding=7)
+    uint slot = texelFetch(uBrickPtrL2, b, 0).r;
+    if (slot == INVALID) { matOut = 0u; return false; }
+
+    // Mirror Y exactly like the writer did:
+    int ly = BRICK - 1 - lc.y;
+
+    // Stack along Z: slice = slot*BRICK + localZ
+    int zSlice = int(slot) * BRICK + lc.z;
+    ivec3 atlasP = ivec3(lc.x, ly, zSlice);
+
+    uint occ = texelFetch(uOccTex, atlasP, 0).r;
+    matOut   = texelFetch(uMatTex, atlasP, 0).r;
+    return occ > 0u;
+}
+
 struct Ray { vec3 o; vec3 d; };
 
 Ray makeRay(vec2 p) {
@@ -85,7 +109,8 @@ bool gridRaycastL0(Ray r, vec3 invD, out ivec3 cell, out int hitFace, out float 
     for(int i=0;i<maxSteps;i++){
         if(any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, vox.dim))) break;
         steps++;
-        if(texelFetch(uOccTex, cell, 0).r > 0u){ tHit = t; return true; }
+        uint matTmp;
+        if(atlasFetch(cell, matTmp)){ tHit = t; return true; }
         int a = (tMax.x < tMax.y) ? 0 : 1;
         a = (tMax[a] < tMax.z) ? a : 2;
         cell[a] += step[a];
@@ -191,7 +216,7 @@ void main() {
     vec3 normal = vec3(0.0);
     float depth = 0.0;
     if (gridRaycastL2(r, cell, face, t, steps2, steps1, steps0)) {
-        uint m = texelFetch(uMatTex, cell, 0).r;
+        uint m; atlasFetch(cell, m);
         albedo = ALBEDO[m <= 3u ? int(m) : 0];
         normal = (face >= 0) ? N[face] : vec3(0);
         depth = t;
