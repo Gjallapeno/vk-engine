@@ -11,12 +11,23 @@ const int MODE_FILL_BOX    = 1;
 const int MODE_FILL_SPHERE = 2;
 const int MODE_NOISE       = 3;
 const int MODE_TERRAIN     = 4;
+const int MODE_GRASS       = 5;
+const int MODE_TREES       = 6;
+const int MODE_FLOWERS     = 7;
 
 // Ops for P.op
 const int OP_REPLACE     = 0;
 const int OP_UNION       = 1;
 const int OP_INTERSECT   = 2;
 const int OP_SUBTRACT    = 3;
+
+// Material IDs
+const int MAT_DIRT    = 1;
+const int MAT_FOLIAGE = 2;
+const int MAT_ROCK    = 3;
+const int MAT_GRASS   = 4;
+const int MAT_TREE    = 5;
+const int MAT_FLOWER  = 6;
 
 layout (std140, binding=2) uniform VoxParams {
     ivec3 dim;   int frame;
@@ -27,9 +38,16 @@ layout (std140, binding=2) uniform VoxParams {
     vec3 boxHalf;   float pad3;
     vec3 sphereCenter; float sphereRadius;
     int mode; int op; int noiseSeed; int material;
-    ivec3 regionMin; int pad5;
-    ivec3 regionMax; float terrainFreq;
+    float terrainFreq;
+    float grassDensity;
+    float treeDensity;
+    float flowerDensity;
 } P;
+
+layout (push_constant) uniform BrickParams {
+    ivec3 brickCoord; // brick coordinate in world-space bricks
+    int brickIndex;   // index into atlas
+} B;
 
 float hash(vec3 p, float seed){
     return fract(sin(dot(p, vec3(12.9898,78.233,37.719)) + seed) * 43758.5453);
@@ -59,13 +77,16 @@ float fbm(vec2 p){
 }
 
 void main(){
-    ivec3 p = ivec3(gl_GlobalInvocationID.xyz) + P.regionMin;
-    if (any(greaterThanEqual(p, P.regionMax))) return;
+    ivec3 local = ivec3(gl_GlobalInvocationID.xyz);
+    // Compute world-space voxel position using the brick coordinate
+    ivec3 p = local + B.brickCoord * P.dim;
 
     // Vulkan's texture coordinate system has (0,0,0) at the image's top-left
     // corner. Our world space assumes Y=0 at the bottom, so flip the Y axis
-    // when accessing the storage images to keep terrain upright.
-    ivec3 imgp = ivec3(p.x, P.dim.y - 1 - p.y, p.z);
+    // when accessing the storage images to keep terrain upright.  Bricks are
+    // stacked along the Z axis of the atlas based on B.brickIndex.
+    ivec3 imgp = ivec3(local.x, P.dim.y - 1 - local.y,
+                       local.z + B.brickIndex * P.dim.z);
 
     uint shape = 0u;
     uint shapeMat = uint(P.material);
@@ -104,6 +125,29 @@ void main(){
             float th = fbm(center2 * P.terrainFreq) * 20.0 + 20.0;
             vec3 rc = vec3(center2.x, th + 2.0, center2.y);
             if(distance(pf, rc) < 2.0){ shape = 1u; shapeMat = 3u; }
+        }
+    }else if(P.mode == MODE_GRASS){
+        float h = fbm(pf.xz * P.terrainFreq) * 20.0 + 20.0;
+        if(abs(pf.y - h) < 0.5){
+            float n = hash(pf.xz, float(P.noiseSeed));
+            if(n < P.grassDensity){ shape = 1u; shapeMat = 4u; }
+        }
+    }else if(P.mode == MODE_TREES){
+        float cellSize = 4.0;
+        vec2 cell = floor(pf.xz / cellSize);
+        float n = hash(cell, float(P.noiseSeed));
+        if(n < P.treeDensity){
+            vec2 center2 = cell * cellSize + cellSize * 0.5;
+            float h = fbm(center2 * P.terrainFreq) * 20.0 + 20.0;
+            if(distance(pf.xz, center2) < 1.0 && pf.y >= h && pf.y < h + 5.0){
+                shape = 1u; shapeMat = 5u;
+            }
+        }
+    }else if(P.mode == MODE_FLOWERS){
+        float h = fbm(pf.xz * P.terrainFreq) * 20.0 + 20.0 + 1.0;
+        if(abs(pf.y - h) < 0.5){
+            float n = hash(pf, float(P.noiseSeed));
+            if(n < P.flowerDensity){ shape = 1u; shapeMat = 6u; }
         }
     }
 
