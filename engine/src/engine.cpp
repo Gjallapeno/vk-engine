@@ -21,6 +21,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -29,6 +30,7 @@
 #include <spdlog/spdlog.h>
 #include <thread>
 #include <vector>
+#include <unordered_map>
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -64,6 +66,190 @@ static float halton(uint32_t i, uint32_t b) {
   }
   return r;
 }
+
+// Manager for streaming 3-D voxel bricks.  Each brick is a fixed size volume
+// stored inside a larger atlas texture.  Bricks are addressed by integer
+// coordinates in world space.  A separate lookup texture stores the mapping
+// from world-space brick coordinates to atlas indices.
+struct BrickManager {
+  struct BrickKey {
+    int x = 0, y = 0, z = 0;
+    bool operator==(const BrickKey &o) const {
+      return x == o.x && y == o.y && z == o.z;
+    }
+  };
+  struct BrickKeyHash {
+    size_t operator()(const BrickKey &k) const noexcept {
+      size_t h = std::hash<int>()(k.x);
+      h ^= std::hash<int>()(k.y + 0x9e3779b9 + (h << 6) + (h >> 2));
+      h ^= std::hash<int>()(k.z + 0x9e3779b9 + (h << 6) + (h >> 2));
+      return h;
+    }
+  };
+
+  struct Brick {
+    BrickKey key{};
+    uint32_t index = 0;
+    uint32_t last_used = 0;
+  };
+
+  VmaAllocator allocator = VK_NULL_HANDLE;
+  VkDevice device = VK_NULL_HANDLE;
+  uint32_t brick_size = 32;      // Edge length of a brick in voxels
+  uint32_t max_bricks = 64;      // Maximum number of bricks resident
+  glm::ivec3 map_dim{64};        // Dimensions of lookup texture in bricks
+
+  Image3D occ_atlas{};           // Atlas containing occupancy bricks
+  Image3D mat_atlas{};           // Atlas containing material bricks
+  Image3D index_img{};           // Lookup texture mapping coords->indices
+
+  UniqueImageView occ_view;            // Sampling view for occupancy atlas
+  UniqueImageView occ_storage_view;    // Storage view for occupancy atlas
+  UniqueImageView mat_view;            // Sampling view for material atlas
+  UniqueImageView mat_storage_view;    // Storage view for material atlas
+  UniqueImageView index_view;          // Sampling view for index texture
+  UniqueImageView index_storage_view;  // Storage view for index texture
+
+  std::unordered_map<BrickKey, Brick, BrickKeyHash> bricks;
+  std::vector<Brick> lru;              // Indexed by brick index
+  std::vector<uint32_t> free_list;     // Available atlas slots
+  std::vector<uint32_t> cpu_index;     // CPU copy of lookup texture
+
+  void init(VmaAllocator alloc, VkDevice dev, uint32_t bsize,
+            uint32_t maxb, glm::ivec3 map_dim_ = glm::ivec3(64)) {
+    allocator = alloc;
+    device = dev;
+    brick_size = bsize;
+    max_bricks = maxb;
+    map_dim = map_dim_;
+
+    occ_atlas = create_image3d(
+        allocator, brick_size, brick_size, brick_size * max_bricks,
+        VK_FORMAT_R8_UINT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    mat_atlas = create_image3d(
+        allocator, brick_size, brick_size, brick_size * max_bricks,
+        VK_FORMAT_R8_UINT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    index_img = create_image3d(
+        allocator, map_dim.x, map_dim.y, map_dim.z, VK_FORMAT_R32_UINT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+
+    VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vi.viewType = VK_IMAGE_VIEW_TYPE_3D;
+    vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    vi.subresourceRange.levelCount = 1;
+    vi.subresourceRange.layerCount = 1;
+
+    vi.image = occ_atlas.image;
+    vi.format = VK_FORMAT_R8_UINT;
+    VK_CHECK(vkCreateImageView(device, &vi, nullptr,
+                               occ_view.init(device)));
+    VK_CHECK(vkCreateImageView(device, &vi, nullptr,
+                               occ_storage_view.init(device)));
+
+    vi.image = mat_atlas.image;
+    vi.format = VK_FORMAT_R8_UINT;
+    VK_CHECK(vkCreateImageView(device, &vi, nullptr,
+                               mat_view.init(device)));
+    VK_CHECK(vkCreateImageView(device, &vi, nullptr,
+                               mat_storage_view.init(device)));
+
+    vi.image = index_img.image;
+    vi.format = VK_FORMAT_R32_UINT;
+    VK_CHECK(vkCreateImageView(device, &vi, nullptr,
+                               index_view.init(device)));
+    VK_CHECK(vkCreateImageView(device, &vi, nullptr,
+                               index_storage_view.init(device)));
+
+    cpu_index.resize(static_cast<size_t>(map_dim.x) * map_dim.y * map_dim.z,
+                     0xFFFFFFFFu);
+    free_list.reserve(max_bricks);
+    lru.resize(max_bricks);
+    for (uint32_t i = 0; i < max_bricks; ++i)
+      free_list.push_back(max_bricks - 1 - i);
+  }
+
+  void destroy() {
+    index_storage_view.reset();
+    index_view.reset();
+    mat_storage_view.reset();
+    mat_view.reset();
+    occ_storage_view.reset();
+    occ_view.reset();
+    destroy_image3d(allocator, index_img);
+    destroy_image3d(allocator, mat_atlas);
+    destroy_image3d(allocator, occ_atlas);
+  }
+
+  // Acquire a brick at the given coordinate.  If necessary the least recently
+  // used brick is recycled.
+  uint32_t acquire(const BrickKey &key, uint32_t frame) {
+    auto it = bricks.find(key);
+    if (it != bricks.end()) {
+      lru[it->second.index].last_used = frame;
+      return it->second.index;
+    }
+
+    uint32_t slot = 0;
+    if (!free_list.empty()) {
+      slot = free_list.back();
+      free_list.pop_back();
+    } else {
+      // recycle least recently used brick
+      uint32_t lru_idx = 0;
+      uint32_t lru_frame = lru[0].last_used;
+      for (uint32_t i = 1; i < max_bricks; ++i) {
+        if (lru[i].last_used < lru_frame) {
+          lru_frame = lru[i].last_used;
+          lru_idx = i;
+        }
+      }
+      slot = lru_idx;
+      bricks.erase(lru[lru_idx].key);
+    }
+    Brick b{};
+    b.key = key;
+    b.index = slot;
+    b.last_used = frame;
+    lru[slot] = b;
+    bricks[key] = b;
+
+    // Update CPU lookup table
+    size_t offset =
+        (static_cast<size_t>(key.z) * map_dim.y + key.y) * map_dim.x + key.x;
+    if (offset < cpu_index.size()) cpu_index[offset] = slot;
+    return slot;
+  }
+
+  // Remove bricks that are further than 'radius' bricks from the camera.
+  void stream(const glm::vec3 &cam_pos, uint32_t frame, int radius) {
+    BrickKey cam_key{static_cast<int>(std::floor(cam_pos.x / brick_size)),
+                     static_cast<int>(std::floor(cam_pos.y / brick_size)),
+                     static_cast<int>(std::floor(cam_pos.z / brick_size))};
+
+    for (auto it = bricks.begin(); it != bricks.end();) {
+      const BrickKey &bk = it->first;
+      int dx = std::abs(bk.x - cam_key.x);
+      int dy = std::abs(bk.y - cam_key.y);
+      int dz = std::abs(bk.z - cam_key.z);
+      if (dx > radius || dy > radius || dz > radius) {
+        free_list.push_back(it->second.index);
+        size_t offset =
+            (static_cast<size_t>(bk.z) * map_dim.y + bk.y) * map_dim.x + bk.x;
+        if (offset < cpu_index.size()) cpu_index[offset] = 0xFFFFFFFFu;
+        it = bricks.erase(it);
+      } else {
+        lru[it->second.index].last_used = frame;
+        ++it;
+      }
+    }
+  }
+
+  VkImage occ_image() const { return occ_atlas.image; }
+  VkImage mat_image() const { return mat_atlas.image; }
+  VkImage index_image() const { return index_img.image; }
+};
 
 struct DrawCtx {
   RayPipeline *ray_pipe = nullptr;
@@ -560,36 +746,23 @@ int run() {
   const uint32_t N = 128;
   const uint32_t N1 = N / 4;
   const uint32_t N2 = N / 32;
-  Image3D occ_img{};
-  Image3D mat_img{};
+  BrickManager brick_mgr;
   Image3D occ_l1_img{};
   Image3D occ_l2_img{};
-  Image3D brick_img{};
-  UniqueImageView occ_view;
-  UniqueImageView occ_storage_view;
   UniqueImageView occ_l1_view;
   UniqueImageView occ_l1_storage_view;
   UniqueImageView occ_l2_view;
   UniqueImageView occ_l2_storage_view;
-  UniqueImageView brick_view;
-  UniqueImageView brick_storage_view;
-  UniqueImageView mat_view;
-  UniqueImageView mat_storage_view;
+  // brick_mgr provides views for occupancy/material/brick index textures
   {
-    occ_img =
-        create_image3d(allocator.raw(), N, N, N, VK_FORMAT_R8_UINT,
-                       VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+    brick_mgr.init(allocator.raw(), device.device(), 32, 64, {N2, N2, N2});
+
     VkImageViewCreateInfo ovi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    ovi.image = occ_img.image;
     ovi.viewType = VK_IMAGE_VIEW_TYPE_3D;
     ovi.format = VK_FORMAT_R8_UINT;
     ovi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     ovi.subresourceRange.levelCount = 1;
     ovi.subresourceRange.layerCount = 1;
-    VK_CHECK(
-        vkCreateImageView(device.device(), &ovi, nullptr, occ_view.init(device.device())));
-    VK_CHECK(vkCreateImageView(device.device(), &ovi, nullptr,
-                               occ_storage_view.init(device.device())));
 
     occ_l1_img =
         create_image3d(allocator.raw(), N1, N1, N1, VK_FORMAT_R8_UINT,
@@ -609,26 +782,6 @@ int run() {
                                occ_l2_view.init(device.device())));
     VK_CHECK(vkCreateImageView(device.device(), &ovi, nullptr,
                                occ_l2_storage_view.init(device.device())));
-
-    brick_img =
-        create_image3d(allocator.raw(), N2, N2, N2, VK_FORMAT_R32_UINT,
-                       VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    ovi.image = brick_img.image;
-    ovi.format = VK_FORMAT_R32_UINT;
-    VK_CHECK(vkCreateImageView(device.device(), &ovi, nullptr,
-                               brick_view.init(device.device())));
-    VK_CHECK(vkCreateImageView(device.device(), &ovi, nullptr,
-                               brick_storage_view.init(device.device())));
-
-    mat_img =
-        create_image3d(allocator.raw(), N, N, N, VK_FORMAT_R8_UINT,
-                       VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    ovi.image = mat_img.image;
-    ovi.format = VK_FORMAT_R8_UINT;
-    VK_CHECK(
-        vkCreateImageView(device.device(), &ovi, nullptr, mat_view.init(device.device())));
-    VK_CHECK(vkCreateImageView(device.device(), &ovi, nullptr,
-                               mat_storage_view.init(device.device())));
   }
 
   // Upload static voxel bounds
@@ -725,10 +878,10 @@ int run() {
     VK_CHECK(vkAllocateDescriptorSets(device.device(), &ai, &comp_set));
 
     VkDescriptorImageInfo occ_info{};
-    occ_info.imageView = occ_storage_view.get();
+    occ_info.imageView = brick_mgr.occ_storage_view.get();
     occ_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     VkDescriptorImageInfo mat_info{};
-    mat_info.imageView = mat_storage_view.get();
+    mat_info.imageView = brick_mgr.mat_storage_view.get();
     mat_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     VkDescriptorBufferInfo param_bi{};
     param_bi.buffer = vox_params_buf.buffer;
@@ -821,7 +974,7 @@ int run() {
 
     VkDescriptorImageInfo occ0_info{};
     occ0_info.sampler = nearest_sampler.get();
-    occ0_info.imageView = occ_view.get();
+    occ0_info.imageView = brick_mgr.occ_view.get();
     occ0_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkDescriptorImageInfo occ1_info{};
     occ1_info.imageView = occ_l1_storage_view.get();
@@ -986,11 +1139,11 @@ int run() {
     vox_bi.range = sizeof(VoxelAABB);
     VkDescriptorImageInfo occ_info{};
     occ_info.sampler = nearest_sampler.get();
-    occ_info.imageView = occ_view.get();
+    occ_info.imageView = brick_mgr.occ_view.get();
     occ_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkDescriptorImageInfo mat_info{};
     mat_info.sampler = nearest_sampler.get();
-    mat_info.imageView = mat_view.get();
+    mat_info.imageView = brick_mgr.mat_view.get();
     mat_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkDescriptorImageInfo occ_l1_info{};
     occ_l1_info.sampler = nearest_sampler.get();
@@ -1002,7 +1155,7 @@ int run() {
     occ_l2_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkDescriptorImageInfo brick_info{};
     brick_info.sampler = nearest_sampler.get();
-    brick_info.imageView = brick_view.get();
+    brick_info.imageView = brick_mgr.index_view.get();
     brick_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkDescriptorImageInfo steps_info{};
     steps_info.imageView = steps_view.get();
@@ -1161,11 +1314,11 @@ int run() {
   ctx.comp_l1_pipe = comp_l1_pipeline.get();
   ctx.comp_l1_layout = comp_l1_layout.get();
   ctx.comp_l1_set = comp_l1_set;
-  ctx.occ_image = occ_img.image;
-  ctx.mat_image = mat_img.image;
+  ctx.occ_image = brick_mgr.occ_image();
+  ctx.mat_image = brick_mgr.mat_image();
   ctx.occ_l1_image = occ_l1_img.image;
   ctx.occ_l2_image = occ_l2_img.image;
-  ctx.brick_ptr_image = brick_img.image;
+  ctx.brick_ptr_image = brick_mgr.index_image();
   ctx.occ_dim = {N, N, N};
   ctx.dispatch_dim = {N, N, N};
   ctx.occ_l1_dim = {N / 4, N / 4, N / 4};
@@ -1362,6 +1515,13 @@ int run() {
     vparams.regionMax = {static_cast<int>(N), static_cast<int>(N),
                          static_cast<int>(N)};
     vparams.terrainFreq = 0.05f;
+
+    BrickManager::BrickKey cam_key{
+        static_cast<int>(std::floor(cam.position.x / brick_mgr.brick_size)),
+        static_cast<int>(std::floor(cam.position.y / brick_mgr.brick_size)),
+        static_cast<int>(std::floor(cam.position.z / brick_mgr.brick_size))};
+    brick_mgr.acquire(cam_key, vparams.frame);
+    brick_mgr.stream(cam.position, vparams.frame, 2);
     upload_buffer(allocator.raw(), transfer, device.graphics_queue(),
                   vox_params_buf, &vparams, sizeof(vparams));
 
@@ -1404,22 +1564,15 @@ int run() {
   ray_pipeline.reset();
   present_pipeline.reset();
 
-  occ_storage_view.reset();
-  occ_view.reset();
   occ_l1_storage_view.reset();
   occ_l1_view.reset();
   occ_l2_storage_view.reset();
   occ_l2_view.reset();
-  brick_storage_view.reset();
-  brick_view.reset();
-  mat_storage_view.reset();
-  mat_view.reset();
 
-  destroy_image3d(allocator.raw(), occ_img);
+  brick_mgr.destroy();
+
   destroy_image3d(allocator.raw(), occ_l1_img);
   destroy_image3d(allocator.raw(), occ_l2_img);
-  destroy_image3d(allocator.raw(), brick_img);
-  destroy_image3d(allocator.raw(), mat_img);
   destroy_buffer(allocator.raw(), cam_buf);
   destroy_buffer(allocator.raw(), vox_buf);
   destroy_buffer(allocator.raw(), vox_params_buf);
