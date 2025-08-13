@@ -261,7 +261,7 @@ struct DrawCtx {
   VkDescriptorSet comp_set = VK_NULL_HANDLE;
   VkPipeline comp_l1_pipe = VK_NULL_HANDLE;
   VkPipelineLayout comp_l1_layout = VK_NULL_HANDLE;
-  VkDescriptorSet comp_l1_set = VK_NULL_HANDLE;
+  std::vector<VkDescriptorSet> comp_l1_sets;
   VkImage occ_image = VK_NULL_HANDLE;
   VkImage mat_image = VK_NULL_HANDLE;
   VkImage occ_l1_image = VK_NULL_HANDLE;
@@ -284,6 +284,12 @@ struct DrawCtx {
   VkExtent3D dispatch_l1_dim{0, 0, 0};
   VkExtent3D occ_l2_dim{0, 0, 0};
   VkExtent3D dispatch_l2_dim{0, 0, 0};
+  VkImageView occ_view = VK_NULL_HANDLE;
+  VkImageView occ_l1_view = VK_NULL_HANDLE;
+  VkImageView occ_l1_storage_view = VK_NULL_HANDLE;
+  VkImageView occ_l2_view = VK_NULL_HANDLE;
+  VkImageView occ_l2_storage_view = VK_NULL_HANDLE;
+  uint32_t occ_levels = 0;
   bool first_frame = true;
 };
 
@@ -336,6 +342,12 @@ struct VoxParams {
   int pad5 = 0;
   glm::ivec3 regionMax{0};
   float terrainFreq = 0.0f;
+};
+
+struct BuildOccParams {
+  glm::ivec3 srcDim{0};
+  glm::ivec3 dstDim{0};
+  int blockSize = 1;
 };
 
 static VkShaderModule load_module(VkDevice dev, const std::string &path) {
@@ -407,7 +419,7 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   vkCmdDispatch(cmd, gx, gy, gz);
   end_label();
 
-  begin_label("L1 build", kColorCompute);
+  begin_label("Build occupancy", kColorCompute);
   // Transition L0 outputs for sampling
   VkImageMemoryBarrier2 mid[2]{};
   for (int i = 0; i < 2; i++) {
@@ -428,20 +440,65 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   dep.pImageMemoryBarriers = mid;
   vkCmdPipelineBarrier2(cmd, &dep);
 
-  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_l1_pipe);
-  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                          ctx->comp_l1_layout, 0, 1, &ctx->comp_l1_set, 0,
-                          nullptr);
-  gx = (ctx->dispatch_l1_dim.width + 7) / 8;
-  gy = (ctx->dispatch_l1_dim.height + 7) / 8;
-  gz = (ctx->dispatch_l1_dim.depth + 7) / 8;
-  vkCmdDispatch(cmd, gx, gy, gz);
+  VkImage occ_images[3] = {ctx->occ_image, ctx->occ_l1_image, ctx->occ_l2_image};
+  VkExtent3D occ_dims[3] = {ctx->occ_dim, ctx->occ_l1_dim, ctx->occ_l2_dim};
+
+  for (uint32_t level = 0; level < ctx->occ_levels - 1; ++level) {
+    VkImageMemoryBarrier2 b[2]{};
+    for (int i = 0; i < 2; ++i) {
+      b[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+      b[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      b[i].subresourceRange.levelCount = 1;
+      b[i].subresourceRange.layerCount = 1;
+    }
+    b[0].srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    b[0].srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+    b[0].dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    b[0].dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    b[0].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    b[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    b[0].image = occ_images[level];
+
+    b[1].srcStageMask = ctx->first_frame ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    b[1].srcAccessMask = ctx->first_frame ? VK_ACCESS_2_NONE : VK_ACCESS_2_SHADER_WRITE_BIT;
+    b[1].dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    b[1].dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+    b[1].oldLayout = ctx->first_frame ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
+    b[1].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    b[1].image = occ_images[level + 1];
+
+    dep.imageMemoryBarrierCount = 2;
+    dep.pImageMemoryBarriers = b;
+    vkCmdPipelineBarrier2(cmd, &dep);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_l1_pipe);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            ctx->comp_l1_layout, 0, 1,
+                            &ctx->comp_l1_sets[level], 0, nullptr);
+
+    BuildOccParams params{};
+    params.srcDim = {static_cast<int>(occ_dims[level].width),
+                     static_cast<int>(occ_dims[level].height),
+                     static_cast<int>(occ_dims[level].depth)};
+    params.dstDim = {static_cast<int>(occ_dims[level + 1].width),
+                     static_cast<int>(occ_dims[level + 1].height),
+                     static_cast<int>(occ_dims[level + 1].depth)};
+    params.blockSize = static_cast<int>(occ_dims[level].width /
+                                        occ_dims[level + 1].width);
+    vkCmdPushConstants(cmd, ctx->comp_l1_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(params), &params);
+
+    gx = (occ_dims[level + 1].width + 7) / 8;
+    gy = (occ_dims[level + 1].height + 7) / 8;
+    gz = (occ_dims[level + 1].depth + 7) / 8;
+    vkCmdDispatch(cmd, gx, gy, gz);
+  }
 
   end_label();
 
   begin_label("Geometry", kColorGraphics);
 
-  VkImageMemoryBarrier2 geom[5]{};
+  VkImageMemoryBarrier2 geom[6]{};
 
   // occ_l1_image: compute write -> fragment sampled read
   geom[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -456,22 +513,35 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   geom[0].subresourceRange.layerCount = 1;
   geom[0].image = ctx->occ_l1_image;
 
-  // steps image for fragment writes
+  // occ_l2_image: compute write -> fragment sampled read
   geom[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-  geom[1].srcStageMask = ctx->first_frame ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-  geom[1].srcAccessMask = ctx->first_frame ? VK_ACCESS_2_NONE : VK_ACCESS_2_TRANSFER_WRITE_BIT;
+  geom[1].srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+  geom[1].srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
   geom[1].dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
-  geom[1].dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
-  geom[1].oldLayout = ctx->first_frame ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
-  geom[1].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+  geom[1].dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+  geom[1].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+  geom[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   geom[1].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
   geom[1].subresourceRange.levelCount = 1;
   geom[1].subresourceRange.layerCount = 1;
-  geom[1].image = ctx->steps_image;
+  geom[1].image = ctx->occ_l2_image;
+
+  // steps image for fragment writes
+  geom[2].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+  geom[2].srcStageMask = ctx->first_frame ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+  geom[2].srcAccessMask = ctx->first_frame ? VK_ACCESS_2_NONE : VK_ACCESS_2_TRANSFER_WRITE_BIT;
+  geom[2].dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+  geom[2].dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+  geom[2].oldLayout = ctx->first_frame ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
+  geom[2].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+  geom[2].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  geom[2].subresourceRange.levelCount = 1;
+  geom[2].subresourceRange.layerCount = 1;
+  geom[2].image = ctx->steps_image;
 
   // G-buffer images for color attachment writes
   for (int i = 0; i < 3; i++) {
-    int idx = i + 2;
+    int idx = i + 3;
     geom[idx].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     geom[idx].srcStageMask = ctx->first_frame ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
     geom[idx].srcAccessMask = ctx->first_frame ? VK_ACCESS_2_NONE : VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
@@ -485,11 +555,11 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
     geom[idx].subresourceRange.levelCount = 1;
     geom[idx].subresourceRange.layerCount = 1;
   }
-  geom[2].image = ctx->g_albedo;
-  geom[3].image = ctx->g_normal;
-  geom[4].image = ctx->g_depth;
+  geom[3].image = ctx->g_albedo;
+  geom[4].image = ctx->g_normal;
+  geom[5].image = ctx->g_depth;
 
-  dep.imageMemoryBarrierCount = 5;
+  dep.imageMemoryBarrierCount = 6;
   dep.pImageMemoryBarriers = geom;
   vkCmdPipelineBarrier2(cmd, &dep);
 
@@ -809,7 +879,7 @@ int run() {
   UniquePipelineLayout comp_l1_layout;
   UniquePipeline comp_l1_pipeline;
   UniqueDescriptorPool comp_l1_pool;
-  VkDescriptorSet comp_l1_set = VK_NULL_HANDLE;
+  DrawCtx ctx{};
   {
     VkDescriptorSetLayoutBinding binds[3]{};
     binds[0].binding = 0;
@@ -926,11 +996,17 @@ int run() {
     VK_CHECK(vkCreateDescriptorSetLayout(device.device(), &dlci, nullptr,
                                          comp_l1_dsl.init(device.device())));
 
+    VkPushConstantRange pcr{};
+    pcr.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pcr.offset = 0;
+    pcr.size = sizeof(BuildOccParams);
     VkPipelineLayoutCreateInfo plci{
         VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     plci.setLayoutCount = 1;
     VkDescriptorSetLayout comp_l1_dsl_handle = comp_l1_dsl.get();
     plci.pSetLayouts = &comp_l1_dsl_handle;
+    plci.pushConstantRangeCount = 1;
+    plci.pPushConstantRanges = &pcr;
     VK_CHECK(vkCreatePipelineLayout(device.device(), &plci, nullptr,
                                     comp_l1_layout.init(device.device())));
 
@@ -950,49 +1026,71 @@ int run() {
                                       comp_l1_pipeline.init(device.device())));
     vkDestroyShaderModule(device.device(), cs, nullptr);
 
+    const uint32_t occ_levels = 3;
     VkDescriptorPoolSize psizes[2]{};
     psizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    psizes[0].descriptorCount = 1;
+    psizes[0].descriptorCount = occ_levels - 1;
     psizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    psizes[1].descriptorCount = 1;
+    psizes[1].descriptorCount = occ_levels - 1;
     VkDescriptorPoolCreateInfo dpci{
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    dpci.maxSets = 1;
+    dpci.maxSets = occ_levels - 1;
     dpci.poolSizeCount = 2;
     dpci.pPoolSizes = psizes;
     VK_CHECK(vkCreateDescriptorPool(device.device(), &dpci, nullptr,
                                     comp_l1_pool.init(device.device())));
 
+    std::vector<VkDescriptorSet> comp_sets(occ_levels - 1);
+    std::vector<VkDescriptorSetLayout> layouts(occ_levels - 1, comp_l1_dsl.get());
     VkDescriptorSetAllocateInfo ai{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     ai.descriptorPool = comp_l1_pool.get();
-    ai.descriptorSetCount = 1;
-    comp_l1_dsl_handle = comp_l1_dsl.get();
-    ai.pSetLayouts = &comp_l1_dsl_handle;
-    VK_CHECK(vkAllocateDescriptorSets(device.device(), &ai, &comp_l1_set));
+    ai.descriptorSetCount = occ_levels - 1;
+    ai.pSetLayouts = layouts.data();
+    VK_CHECK(vkAllocateDescriptorSets(device.device(), &ai, comp_sets.data()));
 
-    VkDescriptorImageInfo occ0_info{};
-    occ0_info.sampler = nearest_sampler.get();
-    occ0_info.imageView = brick_mgr.occ_view.get();
-    occ0_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    VkDescriptorImageInfo occ1_info{};
-    occ1_info.imageView = occ_l1_storage_view.get();
-    occ1_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    VkWriteDescriptorSet ws1[2]{};
-    ws1[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    ws1[0].dstSet = comp_l1_set;
-    ws1[0].dstBinding = 0;
-    ws1[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    ws1[0].descriptorCount = 1;
-    ws1[0].pImageInfo = &occ0_info;
-    ws1[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    ws1[1].dstSet = comp_l1_set;
-    ws1[1].dstBinding = 1;
-    ws1[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    ws1[1].descriptorCount = 1;
-    ws1[1].pImageInfo = &occ1_info;
-    vkUpdateDescriptorSets(device.device(), 2, ws1, 0, nullptr);
+    std::vector<VkDescriptorImageInfo> src_infos(occ_levels - 1);
+    std::vector<VkDescriptorImageInfo> dst_infos(occ_levels - 1);
+    std::vector<VkWriteDescriptorSet> ws(2 * (occ_levels - 1));
+
+    src_infos[0].sampler = nearest_sampler.get();
+    src_infos[0].imageView = brick_mgr.occ_view.get();
+    src_infos[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    dst_infos[0].imageView = occ_l1_storage_view.get();
+    dst_infos[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    src_infos[1].sampler = nearest_sampler.get();
+    src_infos[1].imageView = occ_l1_view.get();
+    src_infos[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    dst_infos[1].imageView = occ_l2_storage_view.get();
+    dst_infos[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    for (uint32_t i = 0; i < occ_levels - 1; ++i) {
+      ws[2 * i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+      ws[2 * i].dstSet = comp_sets[i];
+      ws[2 * i].dstBinding = 0;
+      ws[2 * i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+      ws[2 * i].descriptorCount = 1;
+      ws[2 * i].pImageInfo = &src_infos[i];
+
+      ws[2 * i + 1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+      ws[2 * i + 1].dstSet = comp_sets[i];
+      ws[2 * i + 1].dstBinding = 1;
+      ws[2 * i + 1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+      ws[2 * i + 1].descriptorCount = 1;
+      ws[2 * i + 1].pImageInfo = &dst_infos[i];
+    }
+    vkUpdateDescriptorSets(device.device(), static_cast<uint32_t>(ws.size()),
+                           ws.data(), 0, nullptr);
+
+    ctx.occ_view = brick_mgr.occ_view.get();
+    ctx.occ_l1_view = occ_l1_view.get();
+    ctx.occ_l1_storage_view = occ_l1_storage_view.get();
+    ctx.occ_l2_view = occ_l2_view.get();
+    ctx.occ_l2_storage_view = occ_l2_storage_view.get();
+    ctx.occ_levels = occ_levels;
+    ctx.comp_l1_sets = comp_sets;
   }
 
   std::unique_ptr<VulkanSwapchain> swapchain;
@@ -1003,8 +1101,6 @@ int run() {
   UniqueDescriptorPool dpool;
   VkDescriptorSet ray_dset = VK_NULL_HANDLE;
   VkDescriptorSet light_dset = VK_NULL_HANDLE;
-
-  DrawCtx ctx{};
 
   // Descriptor pool for geometry and lighting passes
   {
@@ -1315,7 +1411,6 @@ int run() {
   ctx.comp_set = comp_set;
   ctx.comp_l1_pipe = comp_l1_pipeline.get();
   ctx.comp_l1_layout = comp_l1_layout.get();
-  ctx.comp_l1_set = comp_l1_set;
   ctx.occ_image = brick_mgr.occ_image();
   ctx.mat_image = brick_mgr.mat_image();
   ctx.occ_l1_image = occ_l1_img.image;
