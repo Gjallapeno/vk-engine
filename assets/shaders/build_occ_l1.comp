@@ -1,23 +1,27 @@
 #version 460
 layout(local_size_x=8, local_size_y=8, local_size_z=8) in;
 
-layout(binding=0) uniform usampler3D occL0;
-layout(r8ui, binding=1) uniform uimage3D occL1;
+layout(binding=0) uniform usampler3D occSrc;
+layout(r8ui, binding=1) uniform uimage3D occDst;
+
+layout(push_constant) uniform PushConsts {
+    ivec3 srcDim;
+    ivec3 dstDim;
+    int blockSize;
+} pc;
 
 void main(){
     ivec3 id = ivec3(gl_GlobalInvocationID);
-    ivec3 dim0 = textureSize(occL0, 0);
-    ivec3 dim1 = dim0 / 4;
-    if(any(greaterThanEqual(id, dim1))) return;
-    ivec3 base = id * 4;
+    if(any(greaterThanEqual(id, pc.dstDim))) return;
+    ivec3 base = id * pc.blockSize;
     uint occ = 0u;
-    for(int z=0; z<4 && occ==0; ++z){
-        for(int y=0; y<4 && occ==0; ++y){
-            for(int x=0; x<4; ++x){
+    for(int z=0; z<pc.blockSize && occ==0; ++z){
+        for(int y=0; y<pc.blockSize && occ==0; ++y){
+            for(int x=0; x<pc.blockSize; ++x){
                 ivec3 p = base + ivec3(x,y,z);
-                if(texelFetch(occL0, p, 0).r > 0u){ occ = 1u; break; }
+                if(texelFetch(occSrc, p, 0).r > 0u){ occ = 1u; break; }
             }
         }
     }
-    imageStore(occL1, id, uvec4(occ,0,0,0));
+    imageStore(occDst, id, uvec4(occ,0,0,0));
 }
