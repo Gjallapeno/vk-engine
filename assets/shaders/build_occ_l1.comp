@@ -5,14 +5,15 @@ layout(binding=0) uniform usampler3D occSrc;
 layout(r8ui, binding=1) uniform uimage3D occDst;
 
 layout(push_constant) uniform PushConsts {
-    ivec3 srcDim;
-    ivec3 dstDim;
+    int srcDim[3];
+    int dstDim[3];
     int blockSize;
 } pc;
 
 void main(){
     ivec3 id = ivec3(gl_GlobalInvocationID);
-    if(any(greaterThanEqual(id, pc.dstDim))) return;
+    ivec3 dstDim = ivec3(pc.dstDim[0], pc.dstDim[1], pc.dstDim[2]);
+    if(any(greaterThanEqual(id, dstDim))) return;
     ivec3 base = id * pc.blockSize;
     uint occ = 0u;
     for(int z=0; z<pc.blockSize && occ==0; ++z){

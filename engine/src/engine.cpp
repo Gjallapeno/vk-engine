@@ -276,6 +276,14 @@ struct DrawCtx {
   VkImage steps_image = VK_NULL_HANDLE;
   VkImageView steps_view = VK_NULL_HANDLE;
   VkBuffer steps_buffer = VK_NULL_HANDLE;
+  VkImageLayout occ_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  VkImageLayout mat_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  VkImageLayout occ_l1_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  VkImageLayout occ_l2_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  VkImageLayout g_albedo_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  VkImageLayout g_normal_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  VkImageLayout g_depth_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  VkImageLayout steps_layout = VK_IMAGE_LAYOUT_UNDEFINED;
   VkExtent2D steps_dim{0, 0};
   VkExtent2D ray_extent{0, 0};
   VkExtent3D occ_dim{0, 0, 0};
@@ -393,22 +401,26 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
         ctx->first_frame ? VK_ACCESS_2_NONE : VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
     pre[i].dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     pre[i].dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
-    pre[i].oldLayout = ctx->first_frame
-                           ? VK_IMAGE_LAYOUT_UNDEFINED
-                           : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     pre[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
     pre[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     pre[i].subresourceRange.levelCount = 1;
     pre[i].subresourceRange.layerCount = 1;
   }
   pre[0].image = ctx->occ_image;
+  pre[0].oldLayout = ctx->occ_layout;
   pre[1].image = ctx->mat_image;
+  pre[1].oldLayout = ctx->mat_layout;
   pre[2].image = ctx->occ_l1_image;
+  pre[2].oldLayout = ctx->occ_l1_layout;
 
   VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
   dep.imageMemoryBarrierCount = 3;
   dep.pImageMemoryBarriers = pre;
   vkCmdPipelineBarrier2(cmd, &dep);
+
+  ctx->occ_layout = VK_IMAGE_LAYOUT_GENERAL;
+  ctx->mat_layout = VK_IMAGE_LAYOUT_GENERAL;
+  ctx->occ_l1_layout = VK_IMAGE_LAYOUT_GENERAL;
 
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_pipe);
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_layout,
@@ -428,20 +440,25 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
     mid[i].srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
     mid[i].dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     mid[i].dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
-    mid[i].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
     mid[i].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     mid[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     mid[i].subresourceRange.levelCount = 1;
     mid[i].subresourceRange.layerCount = 1;
   }
   mid[0].image = ctx->occ_image;
+  mid[0].oldLayout = ctx->occ_layout;
   mid[1].image = ctx->mat_image;
+  mid[1].oldLayout = ctx->mat_layout;
   dep.imageMemoryBarrierCount = 2;
   dep.pImageMemoryBarriers = mid;
   vkCmdPipelineBarrier2(cmd, &dep);
 
+  ctx->occ_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  ctx->mat_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
   VkImage occ_images[3] = {ctx->occ_image, ctx->occ_l1_image, ctx->occ_l2_image};
   VkExtent3D occ_dims[3] = {ctx->occ_dim, ctx->occ_l1_dim, ctx->occ_l2_dim};
+  VkImageLayout* occ_layouts[3] = {&ctx->occ_layout, &ctx->occ_l1_layout, &ctx->occ_l2_layout};
 
   for (uint32_t level = 0; level < ctx->occ_levels - 1; ++level) {
     VkImageMemoryBarrier2 b[2]{};
@@ -455,7 +472,7 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
     b[0].srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
     b[0].dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     b[0].dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
-    b[0].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    b[0].oldLayout = *occ_layouts[level];
     b[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     b[0].image = occ_images[level];
 
@@ -463,13 +480,16 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
     b[1].srcAccessMask = ctx->first_frame ? VK_ACCESS_2_NONE : VK_ACCESS_2_SHADER_WRITE_BIT;
     b[1].dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     b[1].dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
-    b[1].oldLayout = ctx->first_frame ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
+    b[1].oldLayout = *occ_layouts[level + 1];
     b[1].newLayout = VK_IMAGE_LAYOUT_GENERAL;
     b[1].image = occ_images[level + 1];
 
     dep.imageMemoryBarrierCount = 2;
     dep.pImageMemoryBarriers = b;
     vkCmdPipelineBarrier2(cmd, &dep);
+
+    *occ_layouts[level] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    *occ_layouts[level + 1] = VK_IMAGE_LAYOUT_GENERAL;
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, ctx->comp_l1_pipe);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -506,7 +526,7 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   geom[0].srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
   geom[0].dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
   geom[0].dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
-  geom[0].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+  geom[0].oldLayout = ctx->occ_l1_layout;
   geom[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   geom[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
   geom[0].subresourceRange.levelCount = 1;
@@ -519,7 +539,7 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   geom[1].srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
   geom[1].dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
   geom[1].dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
-  geom[1].oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+  geom[1].oldLayout = ctx->occ_l2_layout;
   geom[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   geom[1].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
   geom[1].subresourceRange.levelCount = 1;
@@ -532,7 +552,7 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   geom[2].srcAccessMask = ctx->first_frame ? VK_ACCESS_2_NONE : VK_ACCESS_2_TRANSFER_WRITE_BIT;
   geom[2].dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
   geom[2].dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
-  geom[2].oldLayout = ctx->first_frame ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
+  geom[2].oldLayout = ctx->steps_layout;
   geom[2].newLayout = VK_IMAGE_LAYOUT_GENERAL;
   geom[2].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
   geom[2].subresourceRange.levelCount = 1;
@@ -540,6 +560,9 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   geom[2].image = ctx->steps_image;
 
   // G-buffer images for color attachment writes
+  VkImageLayout* g_layouts[3] = {&ctx->g_albedo_layout, &ctx->g_normal_layout,
+                                 &ctx->g_depth_layout};
+  VkImage g_images[3] = {ctx->g_albedo, ctx->g_normal, ctx->g_depth};
   for (int i = 0; i < 3; i++) {
     int idx = i + 3;
     geom[idx].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -547,21 +570,24 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
     geom[idx].srcAccessMask = ctx->first_frame ? VK_ACCESS_2_NONE : VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
     geom[idx].dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
     geom[idx].dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-    geom[idx].oldLayout = ctx->first_frame
-                              ? VK_IMAGE_LAYOUT_UNDEFINED
-                              : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    geom[idx].oldLayout = *g_layouts[i];
     geom[idx].newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     geom[idx].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     geom[idx].subresourceRange.levelCount = 1;
     geom[idx].subresourceRange.layerCount = 1;
+    geom[idx].image = g_images[i];
   }
-  geom[3].image = ctx->g_albedo;
-  geom[4].image = ctx->g_normal;
-  geom[5].image = ctx->g_depth;
 
   dep.imageMemoryBarrierCount = 6;
   dep.pImageMemoryBarriers = geom;
   vkCmdPipelineBarrier2(cmd, &dep);
+
+  ctx->occ_l1_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  ctx->occ_l2_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  ctx->steps_layout = VK_IMAGE_LAYOUT_GENERAL;
+  ctx->g_albedo_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  ctx->g_normal_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  ctx->g_depth_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
   // Geometry pass writing G-buffer
   VkRenderingAttachmentInfo gAtt[3]{
@@ -627,32 +653,37 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   steps_to_copy.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
   steps_to_copy.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
   steps_to_copy.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
-  steps_to_copy.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+  steps_to_copy.oldLayout = ctx->steps_layout;
   steps_to_copy.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
   steps_to_copy.subresourceRange = stepsRange;
   steps_to_copy.image = ctx->steps_image;
 
   VkImageMemoryBarrier2 gpost[3]{};
+  VkImageLayout* g_layouts2[3] = {&ctx->g_albedo_layout, &ctx->g_normal_layout,
+                                  &ctx->g_depth_layout};
+  VkImage g_images2[3] = {ctx->g_albedo, ctx->g_normal, ctx->g_depth};
   for (int i = 0; i < 3; i++) {
     gpost[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     gpost[i].srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
     gpost[i].srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
     gpost[i].dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
     gpost[i].dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
-    gpost[i].oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    gpost[i].oldLayout = *g_layouts2[i];
     gpost[i].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     gpost[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     gpost[i].subresourceRange.levelCount = 1;
     gpost[i].subresourceRange.layerCount = 1;
+    gpost[i].image = g_images2[i];
   }
-  gpost[0].image = ctx->g_albedo;
-  gpost[1].image = ctx->g_normal;
-  gpost[2].image = ctx->g_depth;
 
   VkImageMemoryBarrier2 readback_barriers[4] = {steps_to_copy, gpost[0], gpost[1], gpost[2]};
   dep.imageMemoryBarrierCount = 4;
   dep.pImageMemoryBarriers = readback_barriers;
   vkCmdPipelineBarrier2(cmd, &dep);
+
+  ctx->steps_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  for (int i = 0; i < 3; ++i)
+    *g_layouts2[i] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
   VkBufferImageCopy bic{};
   bic.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -668,13 +699,15 @@ static void record_present(VkCommandBuffer cmd, VkImage, VkImageView view,
   steps_to_clear.srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
   steps_to_clear.dstStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
   steps_to_clear.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-  steps_to_clear.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  steps_to_clear.oldLayout = ctx->steps_layout;
   steps_to_clear.newLayout = VK_IMAGE_LAYOUT_GENERAL;
   steps_to_clear.subresourceRange = stepsRange;
   steps_to_clear.image = ctx->steps_image;
   dep.imageMemoryBarrierCount = 1;
   dep.pImageMemoryBarriers = &steps_to_clear;
   vkCmdPipelineBarrier2(cmd, &dep);
+
+  ctx->steps_layout = VK_IMAGE_LAYOUT_GENERAL;
 
   VkClearColorValue zero{{0, 0, 0, 0}};
   vkCmdClearColorImage(cmd, ctx->steps_image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1,
@@ -1397,6 +1430,10 @@ int run() {
     ctx.steps_buffer = steps_buf.buffer;
     ctx.steps_dim = {steps_w, steps_h};
     ctx.ray_extent = {rw, rh};
+    ctx.g_albedo_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    ctx.g_normal_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    ctx.g_depth_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    ctx.steps_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     ctx.first_frame = true;
   };
 
@@ -1415,6 +1452,10 @@ int run() {
   ctx.mat_image = brick_mgr.mat_image();
   ctx.occ_l1_image = occ_l1_img.image;
   ctx.occ_l2_image = occ_l2_img.image;
+  ctx.occ_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  ctx.mat_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  ctx.occ_l1_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  ctx.occ_l2_layout = VK_IMAGE_LAYOUT_UNDEFINED;
   ctx.brick_ptr_image = brick_mgr.index_image();
   ctx.occ_dim = {N, N, N};
   ctx.dispatch_dim = {N, N, N};
