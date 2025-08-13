@@ -1012,7 +1012,9 @@ int run() {
     sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     sizes[0].descriptorCount = 3;
     sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    sizes[1].descriptorCount = 6;
+    // Ray pass now samples 5 images (L0 occ, material, L1 occ, L2 occ, brick ptr)
+    // and the lighting pass samples 3 G-buffer images, so allocate 8 in total.
+    sizes[1].descriptorCount = 8;
     sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     sizes[2].descriptorCount = 1;
     VkDescriptorPoolCreateInfo dpci{
