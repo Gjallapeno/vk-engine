@@ -20,12 +20,16 @@ layout(set=0, binding=1, std140) uniform VoxelAABB {
     ivec3 dim; int pad2;
     ivec3 occL1Dim; int pad3;
     vec3 occL1CellSize; float pad4;
+    ivec3 occL2Dim; int pad5;
+    vec3 occL2CellSize; float pad6;
 } vox;
 
 layout(set=0, binding=2) uniform usampler3D uOccTex;
 layout(set=0, binding=3) uniform usampler3D uMatTex;
 layout(set=0, binding=4) uniform usampler3D uOccTexL1;
 layout(set=0, binding=5, r32ui) uniform uimage2D stepsImg;
+layout(set=0, binding=6) uniform usampler3D uOccTexL2;
+layout(set=0, binding=7) uniform usampler3D uBrickPtrL2;
 
 const int STEPS_SCALE = 4;
 
@@ -93,7 +97,7 @@ bool gridRaycastL0(Ray r, vec3 invD, out ivec3 cell, out int hitFace, out float 
 }
 
 // Traverse coarse L1 occupancy first, then descend to L0 if needed
-bool gridRaycast(Ray r, out ivec3 cell, out int hitFace, out float tHit, out int stepsL1, out int stepsL0) {
+bool gridRaycastL1(Ray r, out ivec3 cell, out int hitFace, out float tHit, out int stepsL1, out int stepsL0) {
     stepsL1 = 0;
     stepsL0 = 0;
     vec3 invD = 1.0 / r.d;
@@ -136,19 +140,63 @@ bool gridRaycast(Ray r, out ivec3 cell, out int hitFace, out float tHit, out int
     return false;
 }
 
+// Traverse coarse L2 occupancy, descend to L1/L0 bricks
+bool gridRaycastL2(Ray r, out ivec3 cell, out int hitFace, out float tHit, out int stepsL2, out int stepsL1, out int stepsL0) {
+    stepsL2 = 0; stepsL1 = 0; stepsL0 = 0;
+    vec3 invD = 1.0 / r.d;
+    vec3 t0s = (vox.min - r.o) * invD;
+    vec3 t1s = (vox.max - r.o) * invD;
+    vec3 tsm = min(t0s, t1s);
+    vec3 tsM = max(t0s, t1s);
+    float t0 = max(max(tsm.x, tsm.y), tsm.z);
+    float t1 = min(min(tsM.x, tsM.y), tsM.z);
+    if (t1 <= max(t0, 0.0)) return false;
+    float t = max(t0, 0.0);
+    vec3 pos = r.o + t * r.d;
+
+    ivec3 dim2 = vox.occL2Dim;
+    vec3 cellSize = vox.occL2CellSize;
+    vec3 invCell = 1.0 / cellSize;
+    vec3 cellf = (pos - vox.min) * invCell;
+    ivec3 cell2 = ivec3(clamp(floor(cellf), vec3(0.0), vec3(dim2) - vec3(1.0)));
+    ivec3 step = ivec3(greaterThan(r.d, vec3(0.0))) * 2 - ivec3(1);
+    vec3 next = vox.min + (vec3(cell2) + (vec3(step)+1.0)*0.5) * cellSize;
+    vec3 tMax = (next - pos) * invD;
+    vec3 tDelta = cellSize * abs(invD);
+    int maxSteps = int(dot(vec3(dim2), vec3(1)));
+    for(int i=0;i<maxSteps;i++){
+        if(any(lessThan(cell2, ivec3(0))) || any(greaterThanEqual(cell2, dim2))) break;
+        if(texelFetch(uOccTexL2, cell2, 0).r > 0u){
+            uint brick = texelFetch(uBrickPtrL2, cell2, 0).r;
+            Ray r2; r2.o = r.o + t * r.d; r2.d = r.d;
+            float tLocal; int s1; int s0;
+            bool hit = gridRaycastL1(r2, cell, hitFace, tLocal, s1, s0);
+            stepsL1 += s1; stepsL0 += s0;
+            if(hit){ tHit = t + tLocal; return true; } else return false;
+        }
+        stepsL2++;
+        int a = (tMax.x < tMax.y) ? 0 : 1;
+        a = (tMax[a] < tMax.z) ? a : 2;
+        cell2[a] += step[a];
+        t       = tMax[a];
+        tMax[a] += tDelta[a];
+    }
+    return false;
+}
+
 void main() {
     Ray r = makeRay(gl_FragCoord.xy);
-    ivec3 cell; int face; float t; int steps1; int steps0;
+    ivec3 cell; int face; float t; int steps2; int steps1; int steps0;
     vec3 albedo = vec3(0.0);
     vec3 normal = vec3(0.0);
     float depth = 0.0;
-    if (gridRaycast(r, cell, face, t, steps1, steps0)) {
+    if (gridRaycastL2(r, cell, face, t, steps2, steps1, steps0)) {
         uint m = texelFetch(uMatTex, cell, 0).r;
         albedo = ALBEDO[m <= 3u ? int(m) : 0];
         normal = (face >= 0) ? N[face] : vec3(0);
         depth = t;
     }
-    int totalSteps = steps0 + steps1;
+    int totalSteps = steps0 + steps1 + steps2;
     ivec2 coord = ivec2(gl_FragCoord.xy) / STEPS_SCALE;
     imageAtomicAdd(stepsImg, coord, uint(totalSteps));
     vec3 color = albedo;
